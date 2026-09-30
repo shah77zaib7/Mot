@@ -241,3 +241,7 @@ list. **Wait for the user's explicit go-ahead.**
 ## Environment
 Windows; Python 3.13.15 (3.11+ required), Node.js 24 LTS; Ollama for local models (not installed).
 winget IDs: Python.Python.3.11, OpenJS.NodeJS.LTS, Ollama.Ollama
+Git: repo initialized this session (identity `shah77zaib7`), main tracks
+https://github.com/shah77zaib7/Mot.git. .gitignore is the AGENTS.md set: `.env`, `data/`,
+`logs/`, `node_modules/`, `dist/`, `__pycache__/`, `*.db` — so keys, chats, config and contacts
+never leave the machine. Commit per phase after the user confirms the phase works.
