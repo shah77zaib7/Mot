@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+litellm>=1.73
+keyring>=25.5
+pywebview>=5.3
+yt-dlp>=2025.1        # play_youtube: ytsearch1: metadata lookup, no download
+pytest>=8.0          # tests only (python -m pytest tests)

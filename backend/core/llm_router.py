@@ -1,0 +1,343 @@
+"""LLM path (Phase 3): the model decides "call Mot's tools" or "answer normally".
+
+Native tool calling when the provider accepts `tools=`, strict JSON otherwise.
+Every call is validated against the registry, retried once, and if that still
+fails we fall back to a normal chat reply. Nothing here ever raises anything
+but llm.LLMError, and the full app list is never put in a prompt.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from . import llm, routines
+from .router import SITES, drop_covered_opens
+from ..tools import registry
+
+log = logging.getLogger("mot")
+
+MAX_STEPS = 6
+HISTORY_TAIL = 6
+TOP_OF_JSON = 1200  # how much raw model output we keep in the log
+
+# Providers that rejected `tools=` : same model, JSON mode from now on.
+_JSON_ONLY: set[str] = set()
+
+JSON_RULES = (
+    '\nReply with strict JSON only, no prose:\n'
+    '{"steps":[{"tool":"open_app","args":{"name":"WhatsApp"}}]} for an action '
+    '(one entry per step, in order), or {"reply":"your answer"} for a normal reply.'
+)
+
+
+def _system(done: str | None = None) -> str:
+    """Short prompt: small local models only understand short prompts."""
+    names = ", ".join(r.get("name", "") for r in routines.list_routines()) or "none"
+    text = (
+        "You are Mot, a Windows assistant.\n"
+        "If the user asks you to DO something Mot can do (open an app or website, search, "
+        "play a video, WhatsApp a contact, install an app, run a routine) reply with tool "
+        "calls, one per step. "
+        "Write app names exactly as the user wrote them - apps are matched by name later, "
+        "so never invent one.\n"
+        "Installing: call install_app. It shows a Confirm card, so never ask the user to "
+        "reply yes instead.\n"
+        "WhatsApp: call whatsapp_message with the name the user used - the tool "
+        "reports an unsaved contact instead of guessing.\n"
+        "Otherwise answer normally in 1-3 sentences, in the user's language.\n"
+        f"Known websites: {', '.join(SITES)}.\n"
+        f"Saved routines: {names}.\n"
+        "Only use the tools you are given."
+    )
+    if done:
+        text += f"\nAlready done for this message: {done}"
+    return text
+
+
+def _tools() -> list[dict[str, Any]]:
+    """The registry, in the shape OpenAI-compatible tool calling wants."""
+    return [
+        {"type": "function", "function": {
+            "name": t.name, "description": t.description, "parameters": t.schema}}
+        for t in registry.TOOLS.values()
+    ]
+
+
+# --- talking to the model ---------------------------------------------------
+
+async def _complete(
+    profile: dict[str, Any],
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> Any:
+    """One non-streaming completion. Raises the raw error for route() to judge."""
+    error = await llm.probe_reachable(profile)
+    if error:
+        raise error
+    kwargs = llm._kwargs(profile)
+    params: dict[str, Any] = {
+        "messages": messages,
+        "timeout": llm.REQUEST_TIMEOUT,
+        **kwargs,
+    }
+    if tools:
+        params["tools"] = tools
+        params["tool_choice"] = "auto"
+    return await llm._litellm().acompletion(**params)
+
+
+def _no_tool_support(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    if "tool" not in text and "function" not in text:
+        return False
+    return any(s in text for s in (
+        "unsupported", "not supported", "unknown parameter", "unrecognized",
+        "invalid_request", "invalid request", "does not support", "disabled",
+        "unexpected", "not allowed", "400", "404",
+    ))
+
+
+# --- reading the answer -----------------------------------------------------
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _message(resp: Any) -> Any:
+    choices = _get(resp, "choices") or []
+    return _get(choices[0], "message") if choices else None
+
+
+def _content(resp: Any) -> str:
+    return str(_get(_message(resp), "content") or "").strip()
+
+
+def _tool_calls(resp: Any) -> list[dict[str, Any]]:
+    """[{"tool": name, "args": {...|raw}}] from a native tool-calling reply."""
+    out: list[dict[str, Any]] = []
+    for call in _get(_message(resp), "tool_calls") or []:
+        fn = _get(call, "function") or {}
+        name = _get(fn, "name")
+        if not name:
+            continue
+        out.append({"tool": str(name), "args": _get(fn, "arguments")})
+    return out
+
+
+def _raw(resp: Any) -> str:
+    """What the model actually said - logged for debugging (requirement 6)."""
+    try:
+        payload = {
+            "content": _get(_message(resp), "content"),
+            "tool_calls": [
+                {"name": _get(_get(c, "function") or {}, "name"),
+                 "arguments": _get(_get(c, "function") or {}, "arguments")}
+                for c in (_get(_message(resp), "tool_calls") or [])
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str)[:TOP_OF_JSON]
+    except Exception:  # noqa: BLE001 - logging must never break a reply
+        return "<unprintable response>"
+
+
+def _json_block(text: str) -> dict[str, Any] | None:
+    """Pull the first {...} out of a reply, tolerating fences and prose."""
+    if not text:
+        return None
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.strip("`")
+        if body[:3].lower() in ("json", "jsn"):
+            body = body[4:]
+    start, end = body.find("{"), body.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(body[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _ours(data: dict[str, Any]) -> bool:
+    return any(key in data for key in ("steps", "reply", "tool", "action"))
+
+
+def _from_json(data: dict[str, Any]) -> tuple[list | None, str | None, str | None]:
+    """(steps, reply, reason) from a parsed JSON object."""
+    if "steps" in data:
+        steps = data["steps"]
+        if isinstance(steps, list) and steps:
+            return steps, None, None
+        return None, None, '"steps" was empty - use {"reply": "..."} to answer normally'
+    if "reply" in data:
+        reply = data["reply"]
+        if isinstance(reply, str) and reply.strip():
+            return None, reply.strip(), None
+        return None, None, '"reply" was empty'
+    if data.get("tool") or data.get("action"):  # single call, no wrapper
+        return [data], None, None
+    return None, None, 'the JSON needs a "steps" or "reply" key'
+
+
+def _interpret(resp: Any, mode: str) -> tuple[list | None, str | None, str | None]:
+    """(steps, reply, reason) for whatever the model returned."""
+    content = _content(resp)
+    if mode == "native":
+        calls = _tool_calls(resp)
+        if calls:
+            steps: list[dict[str, Any]] = []
+            for call in calls:
+                args = call["args"]
+                if isinstance(args, str) or args is None:
+                    parsed = _json_block(str(args or "{}"))
+                    if parsed is None:
+                        return None, None, f"arguments of '{call['tool']}' are not valid JSON"
+                    args = parsed
+                if not isinstance(args, dict):
+                    return None, None, f"arguments of '{call['tool']}' are not an object"
+                steps.append({"tool": call["tool"], "args": args})
+            return steps, None, None
+    data = _json_block(content)
+    if data is not None and _ours(data):
+        return _from_json(data)
+    if mode == "json":
+        if not content:
+            return None, None, "the reply was empty"
+        return None, None, 'the reply was not strict JSON ({"steps": [...]} or {"reply": "..."})'
+    if content:
+        return None, content, None  # plain text answer = normal chat
+    return None, None, "the reply was empty"
+
+
+# --- validation (requirement 4) ---------------------------------------------
+
+def validate(steps: Any) -> str | None:
+    """None when the calls can run, otherwise the reason they can't."""
+    if not isinstance(steps, list) or not steps:
+        return "there were no tool calls"
+    if len(steps) > MAX_STEPS:
+        return f"too many steps ({len(steps)}), max is {MAX_STEPS}"
+    for step in steps:
+        if not isinstance(step, dict):
+            return "a step was not an object"
+        name = step.get("tool") or step.get("action")
+        tool = registry.get(str(name)) if name else None
+        if tool is None:
+            return f"unknown tool '{name}'"
+        args = step.get("args")
+        if args is None:  # the model put the arguments next to the tool name
+            args = {k: v for k, v in step.items() if k not in ("tool", "action", "args")}
+        if not isinstance(args, dict):
+            return f"arguments of '{name}' were not an object"
+        props = tool.schema.get("properties", {})
+        clean: dict[str, Any] = {}
+        for key, value in args.items():
+            if key not in props:
+                continue  # extra keys are ignored, not fatal
+            if value is None or value == "":
+                continue  # blank optional value is fine
+            if not isinstance(value, str):
+                return f"'{key}' of '{name}' must be text"
+            clean[key] = value
+        for required in tool.schema.get("required", []):
+            if not clean.get(required):
+                return f"'{name}' needs '{required}'"
+        step["tool"] = str(name)
+        step["args"] = clean
+    return None
+
+
+def to_plan(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Registry-validated calls -> runner steps (the fast path's shape)."""
+    return [{"action": step["tool"], **step["args"]} for step in steps]
+
+
+# --- the route itself -------------------------------------------------------
+
+def _messages(
+    text: str,
+    history: list[dict[str, str]],
+    mode: str,
+    done: str | None,
+    note: str | None,
+) -> list[dict[str, Any]]:
+    system = _system(done)
+    if mode == "json":
+        system += JSON_RULES
+    if note:
+        system += f"\nYour last reply was invalid: {note}. Reply again."
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    messages += [
+        {"role": m["role"], "content": m["content"]}
+        for m in history[-HISTORY_TAIL:]
+        if m.get("content")
+    ]
+    if not history or history[-1].get("content") != text:
+        messages.append({"role": "user", "content": text})
+    return messages
+
+
+def _mode_for(profile: dict[str, Any]) -> str:
+    return "json" if f"{profile.get('name')}|{profile.get('model')}" in _JSON_ONLY else "native"
+
+
+def forget(profile: dict[str, Any]) -> None:
+    """Testing hook: forget that this provider only speaks JSON."""
+    _JSON_ONLY.discard(f"{profile.get('name')}|{profile.get('model')}")
+
+
+async def route(
+    profile: dict[str, Any],
+    text: str,
+    history: list[dict[str, str]],
+    done: str | None = None,
+) -> dict[str, Any]:
+    """Decide for ONE message.
+
+    -> {"kind": "steps", "steps": [...]}   run these tools
+    -> {"kind": "reply", "text": ...}      the model answered the user
+    -> {"kind": "chat", "reason": ...}     give up: answer with a normal chat call
+    """
+    key = f"{profile.get('name')}|{profile.get('model')}"
+    mode = _mode_for(profile)
+    note: str | None = None
+    reason = "the model never answered"
+    attempts = 0
+    while attempts < 2:
+        messages = _messages(text, history, mode, done, note)
+        try:
+            resp = await _complete(
+                profile, messages, None if mode == "json" else _tools()
+            )
+        except llm.LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if mode == "native" and _no_tool_support(exc):
+                log.info("path=llm %s rejected tools -> JSON mode", key)
+                _JSON_ONLY.add(key)
+                mode = "json"
+                note = None
+                continue  # the mode changed, this attempt does not count
+            raise llm.friendly(exc, profile) from exc
+
+        attempts += 1
+        log.info("LLM router raw [%s attempt %d]: %s", mode, attempts, _raw(resp))
+        steps, reply, reason = _interpret(resp, mode)
+        if reply is not None:
+            log.info("path=llm reply (%d chars)", len(reply))
+            return {"kind": "reply", "text": reply}
+        if steps is not None:
+            error = validate(steps)
+            if error is None:
+                plan = drop_covered_opens(to_plan(steps))  # one tab per site
+                log.info("path=llm actions=%s", [s["action"] for s in plan])
+                return {"kind": "steps", "steps": plan}
+            reason = error
+        log.info("LLM router invalid [%s attempt %d]: %s", mode, attempts, reason)
+        note = reason
+    log.info("path=llm gave up after one retry (%s) -> normal chat", reason)
+    return {"kind": "chat", "reason": reason}
