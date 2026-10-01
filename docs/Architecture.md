@@ -27,7 +27,10 @@ The path taken is logged as `path=fast` / `path=llm` / `path=llm->chat`.
 ```
 Mot/
 ├── AGENTS.md, README.md, docs/
-├── run.pyw               # double-click launcher
+├── run.pyw               # double-click launcher — started by the Desktop shortcut, which calls
+│                         # pythonw.exe on it (Explorer's .pyw association opens IDLE)
+├── tools/                # make_shortcut.py (Desktop + Start Menu .lnk), mot_icon.py (assets/mot.ico)
+├── assets/               # mot.ico: bold "M." on a dark rounded square, generated locally
 ├── backend/
 │   ├── main.py           # FastAPI app + pywebview start
 │   ├── api/              # chat, chats, providers, apps, routines, contacts, feeds, drex, actions

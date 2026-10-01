@@ -187,7 +187,11 @@ def main(argv: list[str] | None = None) -> None:
     start_server(port)
     if not wait_ready(port):
         logging.getLogger("mot").error("Server did not start on port %s", port)
-        return
+        raise RuntimeError(
+            f"Mot's local server did not start on port {port}.\n"
+            "Another program may already be using that port, or a Python package "
+            "is missing.\nThe reason is in logs/mot.log."
+        )
     url = f"http://127.0.0.1:{port}/"
     if args.serve:
         print(f"Mot running at {url}")
@@ -199,8 +203,11 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger("mot").info("Opening window at %s", url)
     try:
         open_window(url, debug=args.debug)
-    except Exception:  # noqa: BLE001 - never die silently, log it
+    except Exception as exc:  # noqa: BLE001 - log it, then let the launcher show it
         logging.getLogger("mot").exception("Could not open the window")
+        raise RuntimeError(
+            f"Mot could not open its window: {exc}\n\nThe reason is in logs/mot.log."
+        ) from exc
 
 
 if __name__ == "__main__":

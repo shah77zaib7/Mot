@@ -38,7 +38,10 @@ Read these before coding:
 - Create .gitignore with: .env, data/, logs/, node_modules/, dist/, __pycache__/, *.db
 
 ## Definition of done (every phase)
-- App launches by double-click (run.pyw) with no terminal window.
+- App launches by double-clicking the **Desktop shortcut** (pythonw.exe on run.pyw) with no
+  terminal window. Do not rely on Explorer's .pyw association — it may open IDLE instead.
 - Everything in the phase checklist works.
 - No crashes on bad input; errors are friendly.
 - docs/Memory.md updated.
+- At the end of every phase, tell the user how to launch Mot themselves (the Desktop shortcut),
+  verify that exact route, close anything you started, and never leave test data or windows behind.
