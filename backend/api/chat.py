@@ -99,6 +99,7 @@ async def _fast_stream(
     plan: list[dict[str, Any]],
     chat_id: str | None,
     label: str,
+    add_user: bool = True,
 ) -> AsyncIterator[str]:
     """Run a fast-path command: no model, action cards stream live."""
     if chat_id is None or db.get_chat(chat_id) is None:
@@ -106,7 +107,8 @@ async def _fast_stream(
         chat_id = chat["id"]
     elif not db.get_messages(chat_id):
         db.touch_chat(chat_id, title=db.title_from(text), profile=label)
-    db.add_message(chat_id, "user", text, label)
+    if add_user:  # regenerate re-runs the steps for the message already saved
+        db.add_message(chat_id, "user", text, label)
 
     yield _event({"type": "start", "chat_id": chat_id, "profile": label})
 
@@ -128,17 +130,38 @@ async def chat(body: ChatIn) -> StreamingResponse:
     if not text and not body.regenerate:
         raise HTTPException(400, "Message is empty.")
 
+    regen_id = body.chat_id
+    if body.regenerate and (regen_id is None or db.get_chat(regen_id) is None):
+        raise HTTPException(400, "There is no message to regenerate.")
+
     # Fast path first: "open X", "search Y on YouTube", "run <routine>" — no LLM.
-    # Only the segments the rules don't know are handed to the model (Phase 3).
+    # Regenerate parses too: re-running "Gold news today" must bring the card
+    # back instead of a plain reply from a model with no tools in its hands.
     plan: list[dict[str, Any]] = []
     rest: list[str] = []
-    if not body.regenerate and not body.findings:
+    if not body.findings:
         plan, rest = fast.parse_parts(text)
+    if not plan and rest and not body.findings:
+        net = fast.news_steps(text)  # safety net: a news request is never plain chat
+        if net and len(rest) == 1:
+            log.info("path=fast steps=%s (safety net)", [s.get("action") for s in net])
+            if body.regenerate:
+                db.drop_last_assistant(regen_id)  # type: ignore[arg-type]
+            label = config.active_label() or "Mot"
+            return StreamingResponse(
+                _fast_stream(text, net, regen_id, label, add_user=not body.regenerate),
+                media_type="text/event-stream",
+                headers=HEADERS,
+            )
+        plan = net or plan  # mixed message: the card first, the model gets the rest
+
     if plan and not rest:
         log.info("path=fast steps=%s", [s.get("action") for s in plan])
+        if body.regenerate:
+            db.drop_last_assistant(regen_id)  # type: ignore[arg-type]
         label = config.active_label() or "Mot"
         return StreamingResponse(
-            _fast_stream(text, plan, body.chat_id, label),
+            _fast_stream(text, plan, regen_id, label, add_user=not body.regenerate),
             media_type="text/event-stream",
             headers=HEADERS,
         )

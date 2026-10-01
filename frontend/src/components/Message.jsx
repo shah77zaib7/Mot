@@ -61,6 +61,7 @@ export default function Message({
           {...action}
           onConfirm={onAction}
           onSummarize={onSummarize}
+          onRetry={canRegenerate ? onRegenerate : undefined}
         />
       ))}
       <div className={streaming ? 'stream-cursor' : undefined}>

@@ -119,7 +119,10 @@ def _apply_result(
         action.update(
             status="done",
             title=(message.rstrip(".") or "Done"),
-            detail=data.get("note") or data.get("url"),
+            # A news card already carries "Updated HH:MM" in its footer line, so it
+            # must not say the time twice under the title.
+            detail=(None if data.get("updated") and data.get("note")
+                    else data.get("note") or data.get("url")),
             data={k: v for k, v in data.items() if k != "steps"},
             message=message,
             phrase=_phrase(kind, step, data),

@@ -1,12 +1,13 @@
-"""Settings > Feeds — GET/PUT the topic feed lists, POST one URL to test it."""
+"""Settings > Feeds — feed lists, the background refresh, POST one URL to test."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from ..core import feeds
+from ..core import feeds, ingest, snapshot
 
 router = APIRouter(prefix="/api", tags=["feeds"])
 log = logging.getLogger("mot")
@@ -20,9 +21,36 @@ class TestIn(BaseModel):
     url: str
 
 
+class IngestIn(BaseModel):
+    enabled: bool | None = None
+    interval_hours: float | None = None
+
+
 @router.get("/feeds")
 async def get_feeds() -> dict:
-    return {"topics": feeds.load(), "defaults": feeds.DEFAULTS, "aliases": feeds.ALIASES}
+    return {
+        "topics": feeds.load(),
+        "defaults": feeds.DEFAULTS,
+        "aliases": feeds.ALIASES,
+        "ingest": ingest.status(),
+        "sources": [
+            {"url": url, "error": reason} for url, reason in snapshot.sources().items()
+        ],
+    }
+
+
+@router.put("/feeds/ingest")
+async def put_ingest(body: IngestIn) -> dict:
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    log.info("feed refresh settings: %s", patch)
+    return {"ok": True, "ingest": ingest.save(patch)}
+
+
+@router.post("/feeds/refresh")
+async def refresh_feeds() -> dict:
+    """Run one refresh now; it is bounded by the 8 s per-source deadline."""
+    run = await asyncio.to_thread(ingest.refresh_now)
+    return {**run, "ingest": ingest.status()}
 
 
 @router.put("/feeds")

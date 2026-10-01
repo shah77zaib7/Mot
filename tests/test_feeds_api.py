@@ -132,3 +132,38 @@ def test_the_model_is_not_consulted_for_any_known_topic(client, monkeypatch):
 
 def _sse(body: str) -> list[dict]:
     return [json.loads(line[5:]) for line in body.splitlines() if line.startswith("data:")]
+
+
+# --- the background refresh ---------------------------------------------------
+
+def test_the_feeds_endpoint_reports_the_refresh_state(client):
+    body = client.get("/api/feeds").json()
+
+    assert body["ingest"]["enabled"] is True
+    assert body["ingest"]["interval_hours"] == 2.0
+    assert body["ingest"]["last_ingest_at"] is None
+    assert isinstance(body["sources"], list)
+
+
+def test_the_refresh_controls_round_trip(client):
+    saved = client.put("/api/feeds/ingest",
+                       json={"enabled": False, "interval_hours": 4}).json()
+
+    assert saved["ok"] is True
+    assert saved["ingest"]["enabled"] is False
+    assert saved["ingest"]["interval_hours"] == 4.0
+    assert client.get("/api/feeds").json()["ingest"]["interval_hours"] == 4.0
+
+
+def test_refresh_now_runs_the_job_without_the_network(client, monkeypatch, tmp_path):
+    from backend.core import feeds, snapshot
+
+    monkeypatch.setattr(
+        feeds, "refresh_all",
+        lambda: snapshot.write({"gold": []}, {"https://a/rss": ""}),
+    )
+    body = client.post("/api/feeds/refresh").json()
+
+    assert body["ok"] is True
+    assert body["ingest"]["last_ingest_at"] is not None
+    assert body["ingest"]["sources"] == 1

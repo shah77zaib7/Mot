@@ -26,7 +26,7 @@ from .api import (
     providers,
     routines as routines_api,
 )
-from .core import config
+from .core import config, ingest
 
 LOG_PATH = config.LOG_DIR / "mot.log"
 
@@ -193,6 +193,7 @@ def main(argv: list[str] | None = None) -> None:
             "is missing.\nThe reason is in logs/mot.log."
         )
     url = f"http://127.0.0.1:{port}/"
+    ingest.start()  # one feed refresh now, then every interval_hours (default 2)
     if args.serve:
         print(f"Mot running at {url}")
         try:

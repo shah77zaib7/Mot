@@ -14,9 +14,17 @@ function host(url) {
   }
 }
 
+// "14:03" for the last refresh, "never" when it hasn't run yet.
+function stamp(ts) {
+  if (!ts) return 'never';
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 export default function FeedsPanel() {
   const [topics, setTopics] = useState({}); // {topic: [url, ...]}
   const [defaults, setDefaults] = useState({});
+  const [ingest, setIngest] = useState(null); // interval, toggle, last refresh
+  const [hours, setHours] = useState('2');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(null); // {kind, text}
   const [testUrl, setTestUrl] = useState('');
@@ -27,6 +35,8 @@ export default function FeedsPanel() {
         const data = await api('/api/feeds');
         setTopics(data.topics || {});
         setDefaults(data.defaults || {});
+        setIngest(data.ingest || null);
+        setHours(String(data.ingest?.interval_hours ?? 2));
       } catch (err) {
         setNote({ kind: 'error', text: err.message });
       }
@@ -64,6 +74,33 @@ export default function FeedsPanel() {
         setNote({ kind: 'info', text: 'Back to the built-in feed list.' });
       } else {
         setNote({ kind: 'error', text: data.message });
+      }
+    });
+
+  const applyIngest = (patch) =>
+    run(async () => {
+      const data = await api('/api/feeds/ingest', { method: 'PUT', body: patch });
+      setIngest(data.ingest);
+    });
+
+  const refreshNow = () =>
+    run(async () => {
+      const data = await api('/api/feeds/refresh', { method: 'POST' });
+      if (data.ingest) setIngest(data.ingest);
+      if (data.busy) {
+        setNote({ kind: 'info', text: 'A refresh is already running.' });
+      } else if (data.ok) {
+        const failed = data.ingest?.failed || 0;
+        setNote({
+          kind: 'info',
+          text: `Refreshed at ${stamp(data.ingest?.last_ingest_at)}${
+            failed
+              ? ` — ${failed} of ${data.ingest.sources} sources failing.`
+              : ' — all sources answered.'
+          }`,
+        });
+      } else {
+        setNote({ kind: 'error', text: 'Refresh failed. The reason is in logs/mot.log.' });
       }
     });
 
@@ -107,6 +144,52 @@ export default function FeedsPanel() {
           {note.text}
         </p>
       )}
+
+      <div className="rounded-xl border border-line p-3.5">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={ingest?.enabled ?? true}
+              onChange={(event) => applyIngest({ enabled: event.target.checked })}
+              className="h-4 w-4 accent-accent"
+            />
+            Refresh automatically
+          </label>
+
+          <label className="flex items-center gap-1.5 text-sm text-inksoft">
+            every
+            <input
+              type="number"
+              min="0.25"
+              max="24"
+              step="0.25"
+              value={hours}
+              onChange={(event) => setHours(event.target.value)}
+              onBlur={() => applyIngest({ interval_hours: Number(hours) })}
+              className={`${inputClass} w-20`}
+            />
+            hours
+          </label>
+
+          <button
+            onClick={refreshNow}
+            disabled={busy}
+            className="ml-auto rounded-lg border border-line px-3 py-1.5 text-sm text-inksoft hover:border-accent/60 hover:text-ink disabled:opacity-50"
+          >
+            {busy ? 'Refreshing…' : 'Refresh now'}
+          </button>
+        </div>
+
+        <p className="mt-2 text-[11px] text-inksoft">
+          Last updated {stamp(ingest?.last_ingest_at)}
+          {ingest?.failed
+            ? ` · ${ingest.failed} of ${ingest.sources} sources failing`
+            : ingest?.sources
+              ? ' · all sources ok'
+              : ''}
+        </p>
+      </div>
 
       {topicList.length === 0 && (
         <p className="rounded-xl border border-dashed border-line px-4 py-6 text-center text-sm text-inksoft">
@@ -184,8 +267,9 @@ export default function FeedsPanel() {
       </div>
 
       <p className="text-[11px] text-inksoft">
-        Saved to <span className="font-mono">data/feeds.json</span>. Feeds are re-read every
-        10 minutes; headlines older than 48 hours drop off.
+        Saved to <span className="font-mono">data/feeds.json</span>. Refreshed in the
+        background every {ingest?.interval_hours ?? 2} h; headlines older than 48 hours drop
+        off.
       </p>
     </div>
   );

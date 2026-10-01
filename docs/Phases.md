@@ -103,10 +103,42 @@ Done when: "open youtube and play dilbar dilbar" opens one tab with the video an
       no tools), HTML stripped, snippets capped, only numbers present in the retrieved text
 - [x] Settings > Feeds: per-topic feed lists, add/remove feed or topic, Test feed, Save,
       Restore defaults -> /api/feeds
-- [x] pytest: 193 green (mocked RSS + ddgs + fake Drex transport, no real network)
+- [x] Bug fix (A.1): regenerate no longer skips the fast path — the plan used to be empty, so the
+      model was asked with NO tools and replaced the card with "I don't have web access".
+      Re-running "Gold news today" brings the card back (live: path=fast, no new completion)
+- [x] (A.2) matching tolerates case, punctuation, spacing and trailing filler — "Gold news today?",
+      "gold-news!", "news about gold", "latest gold news", "market news", "forex news" all reach
+      the same card; the chip texts are tested exactly as the UI sends them
+- [x] (A.3) failure ladder: snapshot -> one bounded live read -> snapshot labelled offline ->
+      web_search -> "Couldn't reach the news sources." + Retry. Never a plain model reply
+- [x] (A.4) safety net `router.news_steps()` for a clear news request nothing else matched, plus
+      the prompt line "You have live tools for that - never say you have no web access"
+      (_system() = 994 chars)
+- [x] (B) data/feeds.json re-curated (the only file this touches): gold / silver / crypto /
+      markets / forex, 17 live-tested sources; dropped news.goldseek.com (newest item 2254 days
+      old) and cryptocurrency.cv (HTTP 404); gold queries tightened to gold+price / XAU /
+      gold+price+OR+XAU+bullion so "gold medal" stories stay out. No paid APIs, no keys
+- [x] (C) 2-hour refresh: core/snapshot.py (data/market_ingest/latest.json, 3 h stale) +
+      core/ingest.py (plain thread from main(): startup pass, then interval; no APScheduler);
+      Settings > Feeds gains the interval (default 2 h), an on/off toggle, "Refresh now" and
+      last_ingest_at; every run fetches all topics in parallel, dedupes, keeps the 48 h window,
+      writes headlines + links only, logs per-source status, and never dies with one dead feed;
+      the card footer shows "Updated HH:MM" + the failed-source count
+- [x] (D) editable data/news_phrases.json + core/phrases.py: "aj update", "aaj news", "aj gold",
+      "aj crypto", "market update today", "gold aur bitcoin", "aj market kya hua" -> the same
+      news card with no model; a bare "aj" never fires; an ambiguous topic -> ONE mixed card
+      (gold + crypto + markets, newest first, max 12)
+- [x] pytest: 193 -> 238 green (job, snapshot/stale/offline, case + phrase variants, regenerate,
+      prompt length; an autouse fixture points the snapshot/phrase/settings paths at tmp_path and
+      neuters the web-search fallback, so no test touches a real network)
 Done when: "crypto news today" and "why is gold moving today" return a short sourced summary.
 ✓ verified live on a running server (see Memory.md): instant card with no model call, 4 sourced
 bullets + footer, Summarize button, Drex check. Explanations are context, not advice.
+✓ verified through the Desktop shortcut (see Memory.md): startup refresh 5 topics / 17 sources /
+0 failed; "Gold news today" -> instant card + Regenerate -> the same card with the completion
+count unchanged; "aj gold aur bitcoin pe kya update hai" -> one 12-item mixed card;
+"why is gold moving today" -> 4 sourced bullets + footer; Refresh now moved Last updated to
+03:07 PM.
 
 ## Phase 5 — Polish and auto-start
 - [ ] Optional auto-start with Windows (toggle in Settings)

@@ -9,7 +9,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from . import apps, routines
+from . import apps, phrases, routines
 from .feeds import FILLER, topic_key
 from ..tools.search import ALIASES, ENGINES, engine_key
 
@@ -60,9 +60,17 @@ def _clean(text: str) -> str:
     s = " ".join((text or "").split())
     s = re.sub(r"^(?:hey |hi |ok |okay )?mot[,\s]+", "", s, flags=re.IGNORECASE)
     s = re.sub(r"^(?:please|pls|could you|can you|would you|kindly)\s+", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s+(?:please|pls|thanks|thank you)$", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s+(?:now|for me|today|real quick)$", "", s, flags=re.IGNORECASE)
-    return s.strip(" .!?;:,\t")
+    # Punctuation goes first: "Gold news today!" would otherwise keep "today"
+    # and stop looking like a news request at all.
+    s = s.strip(" \t\r\n.\"'!?;:,")
+    for _ in range(3):
+        trimmed = re.sub(r"\s+(?:please|pls|thanks|thank you)$", "", s, flags=re.IGNORECASE)
+        trimmed = re.sub(r"\s+(?:now|for me|today|todays|real quick)$", "", trimmed, flags=re.IGNORECASE)
+        trimmed = trimmed.strip(" \t\r\n.\"'!?;:,")
+        if trimmed == s:
+            break
+        s = trimmed
+    return s
 
 
 def _segments(text: str) -> list[str]:
@@ -98,36 +106,94 @@ _NEWS_STOP = {
     "this", "what", "when", "where", "who", "how", "why", "which",
 }
 _NEWS_WORD = re.compile(r"^[a-z][a-z0-9 -]{1,29}$", re.IGNORECASE)
+_SQUASH = re.compile(r"[,\-–—/;:|]+")  # "gold-news", "gold, news"
+_TOPIC_WORD = re.compile(r"[a-z0-9]+")
+# Explicit commands win over a phrase: "open market update" opens, it doesn't fetch.
+_COMMAND = re.compile(
+    r"^(?:open|install|download|search|google|look up|find|play|run|start|do|"
+    r"begin|execute|visit|head to|navigate to)\b",
+    re.IGNORECASE,
+)
+# Words that never belong at the end of a news request ("news today, please").
+_NEWS_TAIL = (
+    r"\s+(?:please|pls|thanks|thank you|now|for me|today|todays|real quick|"
+    r"update|updates|headline|headlines)$"
+)
 
 
 def _news_topic(text: str) -> str | None:
-    """'<topic> news' -> the topic, or None when this isn't a news request."""
+    """'<topic> news' -> the topic, or None when this isn't a news request.
+
+    Case, punctuation and spacing are all ignored, and trailing filler is
+    dropped, so "Gold news today", "gold-news!" and "news about gold" resolve
+    to the same card.
+    """
+    text = " ".join(_SQUASH.sub(" ", text).split())
+    for _ in range(3):
+        trimmed = re.sub(_NEWS_TAIL, "", text, flags=re.IGNORECASE)
+        trimmed = trimmed.strip(" \t.\"'!?;:,")
+        if trimmed == text:
+            break
+        text = trimmed
     m = _NEWS.match(text) or _NEWS_ABOUT.match(text)
     if not m:
         return None
-    words = m.group(1).split()
-    while words and words[0].lower() in FILLER:
+    words = _TOPIC_WORD.findall(m.group(1).lower())  # "palladium, platinum"
+    while words and words[0] in FILLER:
         words.pop(0)
-    while words and words[-1].lower() in FILLER:
+    while words and words[-1] in FILLER:
         words.pop()
     topic = " ".join(words)
     if not topic or len(words) > 4:
         return None
-    if not _NEWS_WORD.match(topic) or topic.lower() in _NEWS_NO:
+    if not _NEWS_WORD.match(topic) or topic in _NEWS_NO:
         return None
-    if any(w.lower() in _NEWS_STOP for w in words):
+    if any(w in _NEWS_STOP for w in words):
         return None
     return topic
 
 
 def _news_step(low: str, orig: str) -> list[dict[str, Any]] | None:
     """News card, no model: known topic -> feeds, anything else -> web_search."""
-    topic = _news_topic(low)
+    topic = None
+    if not _COMMAND.match(low):
+        topic = phrases.match(low)  # "aj gold", "aaj news" … curated wording first
+    topic = topic or _news_topic(low)
     if topic is None:
         return None
+    if topic == phrases.MIXED:
+        return [{"action": "get_news", "topic": phrases.MIXED}]
     if topic_key(topic) is not None:
         return [{"action": "get_news", "topic": topic}]
     return [{"action": "web_search", "query": f"{topic} news"}]
+
+
+# Safety net (A.4): words that make a message clearly about market news.
+_TOPIC_WORDS = {
+    "gold", "silver", "bitcoin", "btc", "crypto", "coins", "coin", "market",
+    "markets", "forex", "xau", "xag", "stock", "stocks", "nasdaq", "dow",
+    "ethereum", "eth", "bullion",
+}
+_HEADLINE_WORDS = {"news", "headline", "headlines", "update", "updates", "latest"}
+
+
+def news_steps(text: str) -> list[dict[str, Any]] | None:
+    """A whole message that is really a news request, or None.
+
+    The strict rules above handle clean wording; this is the backstop the chat
+    API checks so "tell me gold news please" can never become a plain model
+    reply. Only exact topic + headline wording counts — a question about *why*
+    something moves stays with the model on purpose.
+    """
+    words = _TOPIC_WORD.findall(_clean(text).lower())
+    topics = [w for w in words if w in _TOPIC_WORDS]
+    if not topics or not set(words) & _HEADLINE_WORDS:
+        return None
+    if len(set(topics)) > 1:  # "gold and crypto news" -> one mixed card
+        return [{"action": "get_news", "topic": phrases.MIXED}]
+    if topic_key(topics[0]) is None:
+        return [{"action": "web_search", "query": f"{topics[0]} news"}]
+    return [{"action": "get_news", "topic": topics[0]}]
 
 
 def _segment(orig: str, site: str | None) -> tuple[list[dict[str, Any]], str | None] | None:

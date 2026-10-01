@@ -279,7 +279,10 @@ def test_news_card_carries_headlines_for_the_frontend(files, monkeypatch):
 
     assert action["kind"] == "get_news"
     assert action["status"] == "done"
-    assert action["detail"].startswith("as of ")
+    # the card's clock lives in the footer ("Updated HH:MM"), never twice
+    assert action["detail"] is None
+    assert action["data"]["updated"].count(":") == 1
+    assert action["data"]["note"].startswith("as of ")
     assert action["title"].endswith("headlines, newest first")
     assert action["data"]["items"][0]["title"] == "Gold hits a high"
     assert "gold headlines" in action["phrase"]
@@ -312,5 +315,6 @@ def test_a_failed_news_fetch_shows_a_hint_not_a_traceback(files, monkeypatch):
     action = runner.run_steps(router.parse("gold news"))[0]
 
     assert action["status"] == "failed"
-    assert action["detail"] == "Check your connection and try again."
+    assert action["detail"] == "Retry, or check the list in Settings \u2192 Feeds."
+    assert action["data"].get("retry") is True  # a Retry button, not a model reply
     assert "Traceback" not in action["message"]

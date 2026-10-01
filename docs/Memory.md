@@ -3,6 +3,13 @@
 Update at the end of every session. Keep it short.
 
 ## Current status
+News feed work done: the reported bug ("Gold news today" answering as a plain model reply) is fixed
+at its root — **regenerate used to skip the fast path**, so the plan was empty and the model was
+asked with no tools at all. News requests are now case/punctuation tolerant, feed failures end in a
+clear Retry card (never a plain reply), `data/feeds.json` grew a `forex` topic and 17 live-tested
+sources, and a plain background thread refreshes everything every 2 h into
+`data/market_ingest/latest.json`. Hinglish phrases ("aj gold", "aj update") are an editable
+`data/news_phrases.json`. 238 tests green; verified live through the Desktop shortcut.
 Launcher fix done: `run.pyw` can no longer fail silently (crash.log + a native message box for
 a missing build, a missing package, a busy port or a bad window start), and
 `tools/make_shortcut.py` writes Desktop + Start Menu shortcuts that call pythonw.exe directly —
@@ -186,6 +193,53 @@ Phase 1, 1.5 and 2 (UI, providers, tools/routines) are done and still verified.
 - Carry-over from 3.5 fixed: `_OPEN` now returns `None` when `apps.match(arg)` finds nothing, so
   "open the gold chart on tradingview" reaches the model instead of dying in a failed card.
 
+### Phase 4 — news fast path, feeds and the 2-hour refresh
+- **The reported bug (A.1) was regenerate, not the matcher.** `api/chat.py` had
+  `if not body.regenerate and not body.findings: plan, rest = fast.parse_parts(text)`, so pressing
+  Regenerate (or Enter on an empty input) produced `plan = rest = []` → `decision = {kind:"chat"}` →
+  `llm.stream_chat()` with **no tools and no `path=` log line**, while `db.drop_last_assistant`
+  deleted the headlines card. That is exactly the "no web access" reply. `parse_parts` now runs for
+  regenerate too (still skipped for `findings`), the drop happens before the fast branch, and
+  `_fast_stream(..., add_user=not regenerate)` avoids a duplicate user row. Verified live:
+  `path=fast steps=['get_news']` and the LiteLLM completion count did not move.
+- **A.2 matching**: `_clean` strips punctuation first (then loops the filler words) so
+  "Gold news today?" is understood; `_news_topic` squashes `, - – — / ; : |` to spaces before
+  matching, so `gold-news` → `gold`. Chip/case variants are parametrised in test_news_paths.py.
+- **A.3/A.4 never plain chat**: `feeds.read_topic()` = hot cache → saved snapshot → ONE 8 s live
+  read (only when the snapshot is > 3 h old) → the snapshot again with `offline: True`.
+  If that and the `web_search` fallback both come back empty, `get_news` returns
+  `"Couldn't reach the news sources."` + `data.retry` → the card shows a **Retry** button.
+  `router.news_steps()` is the backstop in `api/chat.py`: when nothing parsed and the whole message
+  is a news request (a known topic word AND a headline word), it runs the card instead of calling
+  the model — one segment replaces the reply, several segments run the card first.
+  `_system()` gained "You have live tools for that - never say you have no web access." and is
+  994 chars (limit < 1000).
+- **Feeds (B) are edited in `data/feeds.json` ONLY, never in `DEFAULTS`** — `test_feeds.py` asserts
+  `DEFAULTS` == {gold, silver, crypto, markets}. The file now has 5 topics / 17 sources, all
+  live-tested. Dropped `news.goldseek.com/newsRSS.xml` (HTTP 200 but the newest item was 2254 days
+  old) and `cryptocurrency.cv/feed` (HTTP 404). `forex` is a real topic: `feeds.topic_key()` checks
+  the saved keys **before** `ALIASES` (which used to map "forex" → "markets").
+- Google News `q=gold` (and `q=gold+OR+XAU+OR+"gold price"`, which is equivalent) also return
+  "gold medal" and "Twitter Gold" stories; gold is now `gold+price`, `XAU`,
+  `gold+price+OR+XAU+OR+bullion` — the card's 8 headlines are all market news.
+- **The 2-hour refresh (C)**: `core/snapshot.py` (`data/market_ingest/latest.json`,
+  `STALE_AFTER = 3 h`) + `core/ingest.py`, a plain `threading.Thread` started from `main()` — NOT
+  from `create_app()`, so TestClient never touches the network. The loop wakes every 30 s so an
+  interval/toggle change applies without waiting out the old one; `refresh_now()` takes a busy lock
+  and `POST /api/feeds/refresh` runs it with `asyncio.to_thread`. `feeds.refresh_all()` fetches
+  every URL of every topic in one `_fetch_map()` (per-source status logged as `ingest <host>: …`),
+  dedupes, keeps the 48 h window, writes headlines + links only (never article text) and seeds the
+  in-memory cache so the next card is instant. One dead feed never fails the run.
+- **Phrases (D)**: `core/phrases.py` + editable `data/news_phrases.json` — subsequence match with a
+  `require_any` guard so a bare "aj"/"kya" never fires; `topic: "mixed"` means gold + crypto +
+  markets, max 12, newest first. Phrases are tried BEFORE `_news_topic` ("aaj news" would
+  otherwise become a web_search for the query "aaj news"), and skipped when the segment starts with
+  an explicit verb (`_COMMAND`), so "open market update" still opens.
+- `RESEARCH_SYSTEM` answers in the question's language (line added to that prompt only).
+- `tests/conftest.py` grew an autouse `isolated_data` fixture: snapshot + ingest settings +
+  phrases paths → `tmp_path`, `feeds.clear_cache()`, and `news._web_fallback` neutered, so no test
+  can reach the real network or read live headlines.
+
 ### Launcher (shortcut + loud failures)
 - **Windows opens `run.pyw` in IDLE** (the `.pyw` association), so "double-click run.pyw" was
   never really tested — earlier launches called pythonw directly and bypassed Explorer.
@@ -320,10 +374,44 @@ Phase 1, 1.5 and 2 (UI, providers, tools/routines) are done and still verified.
   Leftover Phase-4 instance (PID 13132, port 59656) closed first. At the end: **no pythonw
   running, no stray ports, no crash.log.** 193 tests still green.
 
+- **News/feeds session**: `core/{snapshot,ingest,phrases}.py` + `core/feeds.py`
+  (`_fetch_map`/`refresh_all`/`read_topic`/`mixed_items`, `topic_key` known-before-alias) +
+  `core/router.py` (tolerant `_clean`/`_news_topic`, phrase hook, `news_steps` safety net) +
+  `core/llm_router.py` (no-web-access line, research language line) + `tools/news.py`
+  (snapshot/offline/web_search/Retry) + `api/chat.py` (regenerate fix) +
+  `api/feeds.py` (`PUT /api/feeds/ingest`, `POST /api/feeds/refresh`) + `main.py` (`ingest.start()`)
+  + `ActionCard.jsx` ("Updated HH:MM", failed count, Retry) + `Message.jsx` (onRetry) +
+  `FeedsPanel.jsx` (toggle, interval, Refresh now, last updated). `data/feeds.json` re-curated
+  (5 topics, 17 sources) — the only file B touches.
+- Tests: 193 → **238 green**, no real network. New `tests/test_ingest.py` (job writes headlines +
+  links only, one dead feed never fails it, fresh snapshot = no network, stale snapshot = exactly
+  one live read, offline label, settings bounds, the loop runs once at startup, start is
+  idempotent) and `tests/test_news_paths.py` (13 chip variants, 9 phrases, bare "aj", the safety
+  net, regenerate through `POST /api/chat` with no provider configured — it returns 200 and a card,
+  which it could not do before, prompt < 1000 chars). Two existing hints were updated because the
+  failure card changed to "Couldn't reach the news sources." + Retry.
+- Live through the Desktop shortcut (PID 10884, port 49307, no terminal window):
+  startup refresh → `ingest done: 5 topics, 17 sources, 0 failed`, snapshot `fetched_at=14:57`
+  (gold 40 / silver 33 / crypto 40 / markets 40 / forex 40);
+  **"Gold news today"** → 8-headline card `path=fast`, LiteLLM completion count stayed 25;
+  **Regenerate on that card** → `path=fast steps=['get_news']`, completions still 25 (the bug);
+  **"aj gold aur bitcoin pe kya update hai"** → "12 top gold, crypto and market headlines, newest
+  first" (4m→39m across Seeking Alpha/CoinGape/MarketWatch/Reuters) and still no model call;
+  **"why is gold moving today"** → `path=llm actions=['get_news','web_search']` then
+  `path=research items=13`, 4 bullets each with a source, "As of 15:10", "Context, not trading
+  advice."; Settings > Feeds shows toggle + interval + "Refresh now" + "Last updated 02:57 PM · all
+  sources ok", and Refresh now moved it to **03:07 PM** with 0 failed.
+
 ## Next
 Phase 5 — **wait for the user's explicit go-ahead before starting anything.**
 
 ## Known issues / gotchas
+- **Settings > Feeds → "Restore defaults" writes `DEFAULTS` (4 topics) over the curated
+  `data/feeds.json` (gold/silver/crypto/markets + forex, 17 sources)**, because the tests pin
+  `DEFAULTS` to the original four. `data/` is gitignored, so the curated list cannot be pulled back
+  from git — keep a copy of the file before pressing it. Documented on purpose rather than changed.
+- The saved snapshot, refresh settings and phrase list are all under `data/` (gitignored);
+  `tests/conftest.py` points them at `tmp_path` so no test reads live headlines.
 - **PowerShell eats `start "" "<path>"`**: passing an empty argument to a native command drops
   it, so `cmd /c start "" "…\Mot.lnk"` (PowerShell quoting) turned the .lnk path into the window
   *title* and launched nothing. Verify with `& cmd.exe /c 'start "" "…\Mot.lnk"'` — single-quoted

@@ -37,7 +37,10 @@ Mot/
 │   ├── core/llm.py       # litellm wrapper, model switching, streaming
 │   ├── core/fetch.py     # GET {base}/models (+ /api/tags), presets, tags
 │   ├── core/drex.py      # Drex client (stdlib urllib, injectable transport)
-│   ├── core/feeds.py     # data/feeds.json + RSS fetch, cache, 48 h window
+│   ├── core/feeds.py     # data/feeds.json + RSS fetch, cache, 48 h window, refresh_all/read_topic
+│   ├── core/snapshot.py  # data/market_ingest/latest.json (3 h stale, per-source status)
+│   ├── core/ingest.py    # background refresh thread (startup + every interval_hours)
+│   ├── core/phrases.py   # data/news_phrases.json — "aj gold" etc., no model call
 │   ├── core/router.py    # fast path: parse_parts -> (steps, segments it can't parse)
 │   ├── core/llm_router.py # LLM path: tool calling or strict JSON, validated, retried once
 │   ├── core/config.py    # config.json (providers) + keyring
@@ -137,20 +140,58 @@ For the leftover segments only:
 a topic fetched in parallel (ThreadPoolExecutor, max 8), 10 min cache per topic (5 min for
 searches), dedupe by URL, newest first, last 48 h with a newest-first fallback when the window
 is empty. `feedparser` is imported lazily inside the fetch so a run that never reads news costs
-nothing.
+nothing. Topics are whatever the file holds — gold, silver, crypto, markets, forex — and
+`topic_key()` checks the saved keys **before** `ALIASES`, so a real `forex` topic beats the alias
+that used to fold it into markets.
+
+### The saved snapshot (backend/core/snapshot.py)
+`refresh_all()` reads every URL of every topic in one `_fetch_map()` (per-source status logged as
+`ingest <host>: …`; one dead feed never fails the run) and writes
+`data/market_ingest/latest.json` — headlines and links only (title, url, source, published_at,
+fetched_at, topic), never article text — plus the per-source error map. `STALE_AFTER = 3 h`.
+
+`feeds.read_topic(topic)` answers in this order: hot in-memory cache → saved snapshot (if it is
+younger than 3 h) → **one** bounded live read → the snapshot again with `offline: True`.
+`feeds.mixed_items()` runs that for gold + crypto + markets and returns the newest `limit`
+together, which is how an ambiguous request gets one card instead of three.
+
+### The background refresh (backend/core/ingest.py)
+A plain daemon `threading.Thread` started from `main()` (never from `create_app()`, so TestClient
+never reaches the network): run once at startup, then every `interval_hours` (default 2). The loop
+wakes every 30 s, so the interval/toggle in Settings > Feeds applies without waiting out the old
+value; `refresh_now()` takes a busy lock and `POST /api/feeds/refresh` runs it with
+`asyncio.to_thread`. Settings live next to the snapshot in `data/market_ingest/settings.json`;
+`last_ingest_at` comes from the snapshot itself, so it survives a restart.
+
+### Phrases (backend/core/phrases.py)
+`data/news_phrases.json` (editable, no restart) maps wording like "aj gold", "aaj news",
+"market update today" or "gold aur bitcoin" straight onto a `get_news` step — `topic: "mixed"`
+means gold + crypto + markets, newest first, max 12. Every phrase also needs a word from
+`require_any`, which is what stops a bare "aj" from firing. Phrases are tried before the
+`<topic> news` rule and skipped when the segment starts with an explicit verb (`open`, `search`, …).
 
 The model's tool calls never see their own results, so research is a **second completion**:
 1. Fast path first — `"<topic> news"` / `"gold news today"` runs `get_news` with NO model and
-   renders a news card (headlines + Summarize button). An unresolvable topic becomes
-   `web_search`; a sentence that merely ends in "news" ("good news") falls through to the model.
-2. `api/chat.py` runs the normal loop, then collects `llm_router.findings_from(actions)`
+   renders a news card (headlines + Summarize button). Matching ignores case, punctuation,
+   spacing and trailing filler, so `gold-news!` and `Gold news today?` land on the same card.
+   An unresolvable topic becomes `web_search`; a sentence that merely ends in "news"
+   ("good news") falls through to the model. Regenerate parses too, so re-running a news message
+   brings the card back instead of a plain reply.
+   If feeds and the snapshot both fail, `get_news` tries a plain `web_search` and only then
+   returns `"Couldn't reach the news sources."` + `data.retry` → the card's **Retry** button.
+2. **Safety net** — when no rule matched but the whole message is clearly a news request
+   (`router.news_steps()`: a known topic word plus a news/headline word), `api/chat.py` runs that
+   card instead of asking the model, so a clear news request can never end as plain chat. A
+   question about *why* something moves has no headline word and stays with the model on purpose.
+3. `api/chat.py` runs the normal loop, then collects `llm_router.findings_from(actions)`
    (title, source, age, URL per item; HTML stripped, 24 items max) and streams a second
    completion built by `llm_router.research_messages()` with `RESEARCH_SYSTEM` — **tools are
-   never offered there**, so retrieved web text can never trigger an action.
-3. `llm_router.research_footer()` appends `*As of HH:MM*` and `*Context, not trading advice.*`
+   never offered there**, so retrieved web text can never trigger an action, and the reply is
+   written in the question's language when the model can.
+4. `llm_router.research_footer()` appends `*As of HH:MM*` and `*Context, not trading advice.*`
    deterministically; the model never has to remember them. When a research reply exists the
    `runner.summary()` prefix is suppressed (`chat.compose()` returns the reply alone).
-4. The Summarize button posts `ChatIn.findings` — fast path and router are both skipped and
+5. The Summarize button posts `ChatIn.findings` — fast path and router are both skipped and
    the research completion runs on exactly those headlines.
 
 ## Drex (backend/core/drex.py)
@@ -169,7 +210,8 @@ PUT /api/providers/active · POST /api/providers/fetch · PUT /api/settings ·
 GET /api/actions (events) · POST /api/actions/{id} (confirm/cancel an install or a WhatsApp) ·
 GET/PUT /api/apps (+ POST /api/apps/rescan) · GET/POST/DELETE /api/routines ·
 GET/POST/DELETE /api/contacts (Settings > Contacts) ·
-GET/PUT /api/feeds + POST /api/feeds/test (Settings > Feeds) ·
+GET/PUT /api/feeds + POST /api/feeds/test · PUT /api/feeds/ingest · POST /api/feeds/refresh
+(Settings > Feeds: feed lists, the background refresh interval/on-off and "Refresh now") ·
 POST /api/drex/check (Settings > Drex)
 
 ## Voice (later)

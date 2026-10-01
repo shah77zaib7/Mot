@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import config, snapshot
 
 log = logging.getLogger("mot")
 
@@ -157,8 +157,10 @@ def topic_key(text: str) -> str | None:
     key = " ".join(str(text or "").lower().split()).strip(" ?!.,:;'\"")
     if not key:
         return None
-    key = ALIASES.get(key, key)
     known = load()
+    if key in known:
+        return key  # a topic the user really saved ("forex") beats an alias
+    key = ALIASES.get(key, key)
     if key in known:
         return key
     for name in known:
@@ -241,25 +243,44 @@ def label(url: str) -> str:
     return (host or url).replace("www.", "")
 
 
+def _fetch_map(urls: list[str], timeout: float = TIMEOUT) -> dict[str, tuple[list[dict[str, Any]] | None, str]]:
+    """Fetch every feed at once: {url: (rows, "")} or {url: (None, reason)}.
+
+    One dead feed never kills the others — every URL gets an answer here.
+    """
+    report: dict[str, tuple[list[dict[str, Any]] | None, str]] = {}
+    if not urls:
+        return report
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        futures = {pool.submit(fetch_feed, url): url for url in urls}
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=timeout):
+                url = futures[future]
+                try:
+                    _, rows = future.result()
+                    report[url] = (rows, "")
+                except FeedError as exc:
+                    report[url] = (None, exc.message)
+                except Exception as exc:  # pragma: no cover - defensive
+                    report[url] = (None, str(exc))
+        except concurrent.futures.TimeoutError:
+            pending = [u for f, u in futures.items() if u not in report]
+            for url in pending:
+                report[url] = (None, f"took longer than {int(timeout)} s.")
+    return report
+
+
 def _parallel(urls: list[str]) -> list[dict[str, Any]]:
     """Fetch every feed at once, give up after TIMEOUT, keep whatever landed."""
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     if not urls:
         return items
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
-        futures = {pool.submit(fetch_feed, url): url for url in urls}
-        try:
-            for future in concurrent.futures.as_completed(futures, timeout=TIMEOUT):
-                try:
-                    _, rows = future.result()
-                    items.extend(rows)
-                except FeedError as exc:
-                    errors.append(exc.message)
-                except Exception as exc:  # pragma: no cover - defensive
-                    log.warning("feed fetch failed: %s", exc)
-        except concurrent.futures.TimeoutError:
-            errors.append(f"{len(futures)} feed(s) took longer than {int(TIMEOUT)} s.")
+    for rows, reason in _fetch_map(urls).values():
+        if rows is None:
+            errors.append(reason)
+        else:
+            items.extend(rows)
     if errors and not items:
         raise FeedError(errors[0], "all_failed")
     if errors:
@@ -313,6 +334,105 @@ def topic_items(topic: str, limit: int = 12) -> list[dict[str, Any]]:
         return _fresh(_dedupe(_parallel(urls)), limit)
 
     return _cached(f"topic:{key}", FEED_TTL, build)
+
+
+# Topics that make up the ambiguous "mixed" card (see core/phrases.py).
+MIXED_TOPICS = ("gold", "crypto", "markets")
+SNAPSHOT_ITEMS = 40  # headlines kept per topic on disk
+
+
+def read_topic(topic: str, limit: int = 12) -> dict[str, Any]:
+    """News for one topic *without waiting on the network* when we already have it.
+
+    Order: hot cache → saved snapshot → one bounded live read (only when the
+    snapshot is older than 3 h) → the snapshot again, marked offline. Returns
+    {items, updated, offline, failed} so the card can be labelled honestly.
+    """
+    key = topic_key(topic)
+    if key is None:
+        raise FeedError(f"Mot has no feeds for \u201c{topic}\u201d yet.", "no_topic")
+    if not load().get(key, []):
+        raise FeedError(f"No feeds saved for {key} yet.", "empty")
+
+    hot = _CACHE.get(f"topic:{key}")
+    if hot and time.time() - hot[0] <= FEED_TTL:
+        return {
+            "items": hot[1][:limit], "updated": hot[0],
+            "offline": False, "failed": snapshot.failed_count(),
+        }
+
+    saved = snapshot.items(key, limit)
+    when = snapshot.fetched_at()
+    if saved and not snapshot.is_stale():
+        with _LOCK:
+            _CACHE[f"topic:{key}"] = (when or time.time(), snapshot.items(key, SNAPSHOT_ITEMS))
+        return {
+            "items": saved, "updated": when,
+            "offline": False, "failed": snapshot.failed_count(),
+        }
+
+    try:
+        rows = topic_items(key, limit)  # live + 10 min cache, 8 s deadline
+    except FeedError:
+        if saved:  # offline: headlines we already had, clearly labelled
+            return {
+                "items": saved, "updated": when,
+                "offline": True, "failed": snapshot.failed_count(),
+            }
+        raise
+    return {
+        "items": rows, "updated": time.time(),
+        "offline": False, "failed": snapshot.failed_count(),
+    }
+
+
+def mixed_items(limit: int = 12) -> list[dict[str, Any]]:
+    """The ambiguous card: gold + crypto + markets together, newest first."""
+    pool: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for name in MIXED_TOPICS:
+        try:
+            pool.extend(read_topic(name, limit * 2)["items"])
+        except FeedError as exc:
+            errors.append(exc.message)
+    if not pool and errors:
+        raise FeedError(errors[0], "all_failed")
+    return _dedupe(pool)[:limit]
+
+
+def refresh_all() -> dict[str, Any]:
+    """The background job: fetch every feed of every topic, save, and report.
+
+    One dead feed never fails the run — its reason is logged per source and
+    counted, everything else still lands in data/market_ingest/latest.json.
+    """
+    topics = load()
+    url_topic = {url: name for name, urls in topics.items() for url in urls}
+    report = _fetch_map(list(url_topic))
+
+    by_topic: dict[str, list[dict[str, Any]]] = {}
+    for name in topics:
+        pool: list[dict[str, Any]] = []
+        for url, target in url_topic.items():
+            if target != name:
+                continue
+            rows, _reason = report.get(url, (None, "no answer"))
+            pool.extend(rows or [])
+        by_topic[name] = _fresh(_dedupe(pool), SNAPSHOT_ITEMS)
+
+    summary = snapshot.write(by_topic, {url: r[1] for url, r in report.items()})
+    stamp = summary.get("fetched_at") or time.time()
+    with _LOCK:
+        for name, rows in by_topic.items():
+            _CACHE[f"topic:{name}"] = (stamp, rows)
+
+    for url, (rows, reason) in report.items():
+        log.info("ingest %s: %s", label(url), reason or f"{len(rows or [])} items")
+    log.info(
+        "ingest done: %s topics, %s sources, %s failed",
+        len(by_topic), summary["sources"], summary["failed"],
+    )
+    return {**summary, "topics": {k: len(v) for k, v in by_topic.items()}}
 
 
 def all_items(limit: int = 40) -> list[dict[str, Any]]:

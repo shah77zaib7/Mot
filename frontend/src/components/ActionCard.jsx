@@ -59,6 +59,7 @@ export default function ActionCard({
   data,
   onConfirm,
   onSummarize,
+  onRetry,
 }) {
   const [open, setOpen] = useState(false);
   const tone = TONES[status] ?? TONES.done;
@@ -98,11 +99,21 @@ export default function ActionCard({
             </button>
           </div>
         ) : (
-          <span
-            className={`shrink-0 rounded-full bg-surface2 px-2 py-0.5 text-[11px] font-medium ${tone}`}
-          >
-            {LABELS[status] ?? 'Done'}
-          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {status === 'failed' && data?.retry && onRetry ? (
+              <button
+                onClick={onRetry}
+                className="rounded-lg border border-accent/60 px-2.5 py-0.5 text-[11px] font-medium text-ink hover:bg-surface2"
+              >
+                Retry
+              </button>
+            ) : null}
+            <span
+              className={`shrink-0 rounded-full bg-surface2 px-2 py-0.5 text-[11px] font-medium ${tone}`}
+            >
+              {LABELS[status] ?? 'Done'}
+            </span>
+          </div>
         )}
       </div>
 
@@ -122,6 +133,19 @@ export default function ActionCard({
             >
               Summarize
             </button>
+          ) : null}
+          {data?.updated || data?.failed ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-inksoft">
+              <span>Updated {data.updated || '—'}</span>
+              {data.offline ? <span>· offline</span> : null}
+              {data.failed ? (
+                <span className="text-red-500/80">
+                  · {data.failed}
+                  {data.sources ? ` of ${data.sources}` : ''} source
+                  {data.failed === 1 && !data.sources ? '' : 's'} failed
+                </span>
+              ) : null}
+            </div>
           ) : null}
         </div>
       )}

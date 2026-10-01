@@ -64,10 +64,13 @@ def test_a_network_failure_is_friendly_not_a_traceback(store, monkeypatch):
         raise feeds.FeedError("Couldn't reach example.com.", "unreachable")
 
     monkeypatch.setattr("backend.tools.news.items_for", boom)
+    monkeypatch.setattr("backend.tools.news._web_fallback", lambda topic: [])
     result = registry.call("get_news", {"topic": "gold"})
 
     assert result["ok"] is False
-    assert result["data"]["hint"] == "Check your connection and try again."
+    assert result["message"] == "Couldn't reach the news sources."
+    assert result["data"]["retry"] is True  # the card offers a Retry, not a model reply
+    assert result["data"]["hint"] == "Retry, or check the list in Settings \u2192 Feeds."
 
 
 def test_items_shape_matches_what_the_card_renders(store, monkeypatch):
