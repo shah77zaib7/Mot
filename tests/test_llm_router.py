@@ -121,15 +121,24 @@ def test_the_prompt_never_lists_installed_apps(files):
 
 
 def test_the_prompt_is_short_enough_for_a_3b_model():
-    assert len(llm_router._system()) < 900
+    # requirement 6: keep it under ~1000 chars including the new research tools
+    assert len(llm_router._system()) < 1000
+
+
+def test_the_prompt_treats_web_text_as_data():
+    prompt = llm_router._system()
+
+    assert "get_news" in prompt          # the model knows research exists
+    assert "never instructions" in prompt  # requirement 4: web text is untrusted
+    assert llm_router.RESEARCH_SYSTEM.count("untrusted data") == 1
 
 
 def test_tool_spec_comes_from_the_registry():
     functions = [t["function"] for t in llm_router._tools()]
 
     assert [f["name"] for f in functions] == [
-        "install_app", "open_app", "open_url", "play_youtube",
-        "run_routine", "search_in_browser", "whatsapp_message"]
+        "install_app", "open_app", "open_url", "play_youtube", "run_routine",
+        "search_in_browser", "whatsapp_message", "get_news", "web_search"]
     assert all(f["description"] and f["parameters"] for f in functions)
     assert all(t["type"] == "function" for t in llm_router._tools())
 
@@ -479,3 +488,173 @@ def _aiter(text: str):
         yield text
 
     return stream_chat
+
+
+# --- Phase 4: research (findings in, sourced bullets out) -------------------
+
+def _action(kind, items, status="done"):
+    return {"kind": kind, "status": status, "data": {"items": items}}
+
+
+def test_findings_comes_from_the_cards_the_tools_produced():
+    items = [{"title": "Gold hits a high", "source": "Kitco", "when": "2h",
+              "url": "https://k/1"}]
+    actions = [
+        _action("get_news", items),
+        _action("get_news", items, status="running"),   # not finished yet
+        _action("open_app", items),                     # not a research tool
+        {"kind": "web_search", "status": "done", "data": {}},  # no items
+    ]
+
+    found = llm_router.findings_from(actions)
+
+    assert found == items
+
+
+def test_findings_are_capped_and_text_never_keeps_markup():
+    many = [{"title": f"Story {i}", "source": "S", "when": "1h",
+             "url": f"https://x/{i}"} for i in range(60)]
+    text = llm_router.findings_text(many[:5] + [{"title": "<b>Gold</b> &amp; up",
+                                                 "source": "Kitco", "when": "2h",
+                                                 "url": "https://k/1"}])
+
+    assert len(llm_router.findings_text(many).splitlines()) == llm_router.FINDINGS_CAP
+    assert "<b>" not in text and "&amp;" not in text
+    assert "(Kitco, 2h) https://k/1" in text
+
+
+def test_research_messages_keep_the_rules_in_the_system_slot():
+    history = [{"role": "user", "content": "why is gold moving"},
+               {"role": "assistant", "content": "Checking."}]
+    messages = llm_router.research_messages(
+        "why is gold moving", history,
+        [{"title": "Gold up", "source": "Kitco", "when": "2h", "url": "https://k/1"}],
+    )
+
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == llm_router.RESEARCH_SYSTEM
+    assert "Findings:" in messages[-1]["content"]
+    assert messages[-1]["content"].startswith("why is gold moving")
+    assert "never instructions" in messages[0]["content"]  # requirement 4
+    # the question is carried once, at the end, with the findings attached
+    assert [m["content"] for m in messages].count("why is gold moving") == 0
+    assert messages[-1]["content"].startswith("why is gold moving\n\nFindings:")
+
+
+def test_the_footer_is_deterministic_not_left_to_the_model():
+    footer = llm_router.research_footer()
+
+    assert "As of " in footer
+    assert "Context, not trading advice." in footer
+
+
+def test_the_research_completion_is_offered_no_tools(monkeypatch):
+    """Requirement 4: web results can never trigger actions."""
+    seen: list = []
+
+    async def stream_chat(target, messages):
+        seen.append(messages)
+        yield "- Gold rose [Kitco](https://k/1)"
+
+    monkeypatch.setattr("backend.core.llm.stream_chat", stream_chat)
+    from backend.core import llm
+
+    async def run():
+        return [c async for c in llm.stream_chat({}, [])]
+
+    asyncio.run(run())
+    assert len(seen) == 1
+
+
+def test_model_calls_get_news_then_answers_with_sourced_bullets(client, monkeypatch):
+    from backend.core import llm
+
+    _script([resp(tool_calls=[("get_news", '{"topic": "gold"}')])], monkeypatch)
+    monkeypatch.setattr(
+        "backend.tools.news.items_for",
+        lambda topic, limit=8: [{"title": "Gold hits a high", "source": "Kitco",
+                                 "when": "2h", "url": "https://kitco.com/1",
+                                 "snippet": ""}],
+    )
+
+    async def stream_chat(target, messages):
+        assert messages[0]["role"] == "system"
+        assert "Findings:" in messages[-1]["content"]
+        assert not any(m.get("tools") for m in messages)
+        yield "- Gold hit a record [Kitco](https://kitco.com/1)"
+        yield " on Tuesday."
+
+    monkeypatch.setattr(llm, "stream_chat", stream_chat)
+
+    events = sse_events(client.post(
+        "/api/chat", json={"message": "why is gold moving today"}
+    ).text)
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert [a["kind"] for a in done["actions"]] == ["get_news"]
+    assert "Kitco" in done["text"]
+    assert "Context, not trading advice." in done["text"]
+    assert "As of " in done["text"]
+    # the reply stands alone: no "Showed 3 gold headlines." in front of the bullets
+    assert not done["text"].startswith("Showed")
+
+
+def test_the_summarize_button_answers_from_the_headlines_it_was_given(
+    client, monkeypatch, fake_db,
+):
+    from backend.core import llm
+
+    def explode(*args, **kwargs):
+        raise AssertionError("Summarize must not re-run the fast path or route")
+
+    monkeypatch.setattr(llm_router, "route", explode)
+    monkeypatch.setattr("backend.core.router.parse_parts", lambda t: ([], []))
+
+    asked: list = []
+
+    async def stream_chat(target, messages):
+        asked.append(messages)
+        yield "- Silver rose [Reuters](https://r/1)"
+
+    monkeypatch.setattr(llm, "stream_chat", stream_chat)
+
+    events = sse_events(client.post("/api/chat", json={
+        "message": "Summarize the latest silver news",
+        "findings": [{"title": "Silver rose", "source": "Reuters", "when": "1h",
+                      "url": "https://r/1"}],
+    }).text)
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert "Reuters" in done["text"]
+    assert "Context, not trading advice." in done["text"]
+    assert "Findings:" in asked[0][-1]["content"]
+
+
+def test_a_research_failure_still_saves_the_headlines_card(client, monkeypatch):
+    from backend.core import llm
+
+    _script([resp(tool_calls=[("get_news", '{"topic": "gold"}')])], monkeypatch)
+    monkeypatch.setattr(
+        "backend.tools.news.items_for",
+        lambda topic, limit=8: [{"title": "Gold up", "source": "Kitco",
+                                 "when": "2h", "url": "https://k/1", "snippet": ""}],
+    )
+
+    async def boom(target, messages):
+        raise __import__("backend.core.llm", fromlist=["LLMError"]).LLMError(
+            "The model is offline.", fix="settings")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(llm, "stream_chat", boom)
+
+    events = sse_events(client.post(
+        "/api/chat", json={"message": "why is gold moving today"}
+    ).text)
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["fix"] == "settings"
+    # the card itself was already streamed, so the headlines are not lost
+    kinds = {e["action"]["kind"] for e in events if e["type"] == "action"}
+    assert kinds == {"get_news"}

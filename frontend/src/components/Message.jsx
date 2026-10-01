@@ -41,6 +41,7 @@ export default function Message({
   canRegenerate = false,
   onRegenerate,
   onAction,
+  onSummarize,
 }) {
   if (message.role === 'user') {
     return (
@@ -55,7 +56,12 @@ export default function Message({
   return (
     <div className="group/msg py-2">
       {actions.map((action) => (
-        <ActionCard key={action.id} {...action} onConfirm={onAction} />
+        <ActionCard
+          key={action.id}
+          {...action}
+          onConfirm={onAction}
+          onSummarize={onSummarize}
+        />
       ))}
       <div className={streaming ? 'stream-cursor' : undefined}>
         <Markdown>{message.content}</Markdown>

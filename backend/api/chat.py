@@ -41,6 +41,7 @@ class ChatIn(BaseModel):
     provider_id: str | None = None  # provider picked in the model dropdown
     model_id: str | None = None
     regenerate: bool = False  # re-run the last user message
+    findings: list[dict] | None = None  # Summarize button: headlines to answer from
 
 
 class StopIn(BaseModel):
@@ -131,7 +132,7 @@ async def chat(body: ChatIn) -> StreamingResponse:
     # Only the segments the rules don't know are handed to the model (Phase 3).
     plan: list[dict[str, Any]] = []
     rest: list[str] = []
-    if not body.regenerate:
+    if not body.regenerate and not body.findings:
         plan, rest = fast.parse_parts(text)
     if plan and not rest:
         log.info("path=fast steps=%s", [s.get("action") for s in plan])
@@ -172,47 +173,79 @@ async def chat(body: ChatIn) -> StreamingResponse:
         collected: list[dict[str, Any]] = []  # action cards: fast steps + model steps
         parts: list[str] = []
         saved = False
+        researched = False  # True once findings were answered from, not routed
 
         def compose() -> str:
             reply = "".join(parts)
+            if not reply:  # research or stream failed: keep the cards' own line
+                return runner.summary(collected) if collected else ""
+            if researched:
+                return reply  # bullets stand alone; the cards are above them
             summary = runner.summary(collected) if collected else ""
-            if summary and reply:
+            if summary:
                 return f"{summary} {reply}"
-            return summary or reply
+            return reply
+
+        async def research(items: list[dict[str, Any]]) -> AsyncIterator[str]:
+            """Second completion: findings in, 4-6 sourced bullets out."""
+            nonlocal researched
+            researched = True
+            log.info("path=research items=%d", len(items))
+            messages = llm_router.research_messages(route_text, history, items)
+            async for chunk in llm.stream_chat(target, messages):
+                if stop_event.is_set():
+                    break
+                parts.append(chunk)
+                yield _event({"type": "delta", "text": chunk})
+            if parts and not stop_event.is_set():
+                footer = llm_router.research_footer()
+                parts.append(footer)
+                yield _event({"type": "delta", "text": footer})
 
         try:
-            if plan:
-                # mixed message: the rules did their part, the model gets the rest
-                log.info("path=fast(+llm) steps=%s", [s.get("action") for s in plan])
-                async for event in _action_events(plan, chat_id, collected):
-                    yield event
-
             decision: dict[str, Any] = {"kind": "chat"}
-            if rest:
-                decision = await llm_router.route(
-                    target,
-                    route_text,
-                    history,
-                    done=runner.summary(collected) if collected else None,
-                )
-                if decision["kind"] == "chat":
-                    log.info("path=llm->chat (%s)", decision.get("reason"))
-
-            if decision["kind"] == "steps":
-                async for event in _action_events(decision["steps"], chat_id, collected):
+            if body.findings:
+                # Summarize button: headlines already on screen, no routing.
+                async for event in research(list(body.findings)):
                     yield event
-            elif decision["kind"] == "reply":
-                for chunk in _chunks(decision["text"]):
-                    if stop_event.is_set():  # Stop pressed: keep what we have
-                        break
-                    parts.append(chunk)
-                    yield _event({"type": "delta", "text": chunk})
-            else:  # normal chat (the model had nothing to do, or gave up)
-                async for chunk in llm.stream_chat(target, history):
-                    if stop_event.is_set():
-                        break
-                    parts.append(chunk)
-                    yield _event({"type": "delta", "text": chunk})
+            else:
+                if plan:
+                    # mixed message: the rules did their part, the model gets the rest
+                    log.info("path=fast(+llm) steps=%s", [s.get("action") for s in plan])
+                    async for event in _action_events(plan, chat_id, collected):
+                        yield event
+
+                if rest:
+                    decision = await llm_router.route(
+                        target,
+                        route_text,
+                        history,
+                        done=runner.summary(collected) if collected else None,
+                    )
+                    if decision["kind"] == "chat":
+                        log.info("path=llm->chat (%s)", decision.get("reason"))
+
+                if decision["kind"] == "steps":
+                    async for event in _action_events(decision["steps"], chat_id, collected):
+                        yield event
+                    items = llm_router.findings_from(collected)
+                    if items:
+                        # Research tools ran: answer from them, never from memory.
+                        async for event in research(items):
+                            yield event
+                        decision = {"kind": "chat"}
+                if decision["kind"] == "reply":
+                    for chunk in _chunks(decision["text"]):
+                        if stop_event.is_set():  # Stop pressed: keep what we have
+                            break
+                        parts.append(chunk)
+                        yield _event({"type": "delta", "text": chunk})
+                elif decision["kind"] == "chat" and not researched:
+                    async for chunk in llm.stream_chat(target, history):
+                        if stop_event.is_set():
+                            break
+                        parts.append(chunk)
+                        yield _event({"type": "delta", "text": chunk})
         except llm.LLMError as exc:
             content = compose()
             if content:

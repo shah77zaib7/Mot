@@ -197,7 +197,7 @@ export default function App() {
   );
 
   const send = useCallback(
-    async (rawText, { regenerate = false } = {}) => {
+    async (rawText, { regenerate = false, findings = null } = {}) => {
       const text = (rawText ?? input).trim();
       if (busy) return;
       if (!regenerate && !text) return;
@@ -216,7 +216,7 @@ export default function App() {
       } else {
         setMessages((prev) => [
           ...prev,
-          { id: `local-${Date.now()}`, role: 'user', content: text },
+          { id: `local-${Date.now()}`, role: 'user', content: text, findings },
         ]);
         setInput('');
       }
@@ -232,6 +232,7 @@ export default function App() {
           provider_id: settings.active?.provider_id,
           model_id: settings.active?.model_id,
           regenerate,
+          findings,
         };
         for await (const event of streamChat(payload, controller.signal)) {
           if (event.type === 'start') {
@@ -309,8 +310,14 @@ export default function App() {
 
   const regenerate = useCallback(() => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    if (lastUser) send(lastUser.content, { regenerate: true });
+    if (lastUser) send(lastUser.content, { regenerate: true, findings: lastUser.findings });
   }, [messages, send]);
+
+  // Summarize button on a news card: send those exact headlines to the model.
+  const summarize = useCallback(
+    (items, topic) => send(`Summarize these ${topic || 'news'} headlines`, { findings: items }),
+    [send]
+  );
 
   const retry = useCallback(() => {
     setError(null);
@@ -412,6 +419,7 @@ export default function App() {
                   }
                   onRegenerate={regenerate}
                   onAction={confirmAction}
+                  onSummarize={summarize}
                 />
               ))}
             </div>

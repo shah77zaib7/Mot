@@ -22,14 +22,14 @@ def serve():
             def log_message(self, *args) -> None:  # noqa: ARG002 - keep test output quiet
                 pass
 
-            def do_GET(self) -> None:  # noqa: N802 - http.server naming
+            def _reply(self, body_sent: bytes) -> None:
                 if seen is not None:
                     seen.append((self.path, self.headers.get("Authorization")))
                 if delay:
                     time.sleep(delay)
                 status, body = routes.get(self.path, (404, '{"detail":"Not Found"}'))
                 if callable(body):
-                    body = body(self.headers)
+                    body = body(body_sent)
                 if isinstance(body, str):
                     body = body.encode()
                 self.send_response(status)
@@ -37,6 +37,13 @@ def serve():
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_GET(self) -> None:  # noqa: N802 - http.server naming
+                self._reply(b"")
+
+            def do_POST(self) -> None:  # noqa: N802 - http.server naming
+                length = int(self.headers.get("Content-Length") or 0)
+                self._reply(self.rfile.read(length) if length else b"")
 
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()

@@ -115,6 +115,25 @@ def test_parse_parts_hands_only_the_unknown_segments_to_the_model():
         "url": "https://www.youtube.com", "site": "youtube"}], [])
 
 
+def test_open_with_an_unresolvable_name_goes_to_the_model():
+    # carry-over from 3.5: no failure card, hand the segment to the LLM router
+    assert router.parse("open the gold chart on tradingview") is None
+    steps, rest = router.parse_parts("open the gold chart on tradingview")
+    assert steps == [] and rest == ["open the gold chart on tradingview"]
+
+    # a known app or site still opens instantly
+    assert router.parse("open chrome") == [{"action": "open_app", "name": "chrome"}]
+    assert router.parse("open youtube") == [{"action": "open_url",
+        "url": "https://www.youtube.com", "site": "youtube"}]
+
+
+def test_a_mixed_message_still_opens_the_part_it_recognises():
+    steps, rest = router.parse_parts("open chrome and open the gold chart")
+
+    assert steps == [{"action": "open_app", "name": "chrome"}]
+    assert rest == ["open the gold chart"]
+
+
 # --- Phase 3.5: play rules + one tab per site -------------------------------
 
 def test_play_on_youtube_is_one_step():

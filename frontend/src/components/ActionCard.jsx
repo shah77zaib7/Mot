@@ -27,18 +27,45 @@ const MARKS = {
   cancelled: '×',
 };
 
+// A news card: headline, source, age, and a link that only opens on click.
+function Headline({ item }) {
+  return (
+    <li className="flex items-start gap-2">
+      <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-accent" />
+      <span className="min-w-0 flex-1">
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-[13px] leading-snug text-ink hover:text-accentink hover:underline"
+        >
+          {item.title}
+        </a>
+        <span className="block truncate text-[11px] text-inksoft">
+          {item.source}
+          {item.when ? ` · ${item.when}` : ''}
+        </span>
+      </span>
+    </li>
+  );
+}
+
 export default function ActionCard({
   id,
   title,
   detail,
   status = 'done',
   steps,
+  data,
   onConfirm,
+  onSummarize,
 }) {
   const [open, setOpen] = useState(false);
   const tone = TONES[status] ?? TONES.done;
   const list = Array.isArray(steps) && steps.length ? steps : null;
-  const expandable = Boolean(list || detail);
+  const items = Array.isArray(data?.items) && data.items.length ? data.items : null;
+  // With headlines on screen the detail line already says what it would expand to.
+  const expandable = Boolean(list || (detail && !items));
 
   return (
     <div className="my-3 overflow-hidden rounded-xl border border-line bg-surface">
@@ -78,6 +105,26 @@ export default function ActionCard({
           </span>
         )}
       </div>
+
+      {items && (
+        <div className="border-t border-line/70 px-3.5 py-2.5">
+          <ul className="space-y-2">
+            {items.map((item, index) => (
+              <Headline key={item.url || index} item={item} />
+            ))}
+          </ul>
+          {status === 'done' && onSummarize ? (
+            <button
+              onClick={() =>
+                onSummarize(items, data?.topic || (data?.query || '').replace(/\s*news$/i, ''))
+              }
+              className="mt-2.5 rounded-lg border border-line px-2.5 py-1 text-xs text-inksoft hover:border-accent/60 hover:text-ink"
+            >
+              Summarize
+            </button>
+          ) : null}
+        </div>
+      )}
 
       {expandable && (
         <button

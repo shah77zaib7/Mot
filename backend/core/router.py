@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import apps, routines
+from .feeds import FILLER, topic_key
 from ..tools.search import ALIASES, ENGINES, engine_key
 
 # Short names -> URLs for "open X".
@@ -50,6 +51,8 @@ _PLAY_ON = re.compile(r"^(?:play|put on)\s+(.+?)\s+on\s+(?:youtube|yt)$", re.IGN
 _SEARCH_ON = re.compile(r"^(?:search for|search|google|look up|find)\s+(.+?)\s+on\s+(.+)$", re.IGNORECASE)
 _SEARCH_SITE_FOR = re.compile(r"^(?:search|find)\s+([a-z0-9 ]+?)\s+for\s+(.+)$", re.IGNORECASE)
 _SEARCH = re.compile(r"^(?:search for|search|google|look up|find)\s+(.+)$", re.IGNORECASE)
+_NEWS = re.compile(r"^(?:the\s+)?(.+?)\s+news$", re.IGNORECASE)
+_NEWS_ABOUT = re.compile(r"^(?:the\s+)?news\s+(?:about|on|for)\s+(.+)$", re.IGNORECASE)
 _RUN = re.compile(r"^(?:run|start|do|begin|execute|play)\s+(?:my\s+|the\s+)?(.+)$", re.IGNORECASE)
 
 
@@ -79,6 +82,52 @@ def _known_engine(word: str) -> str | None:
     key = " ".join(word.lower().split())
     key = ALIASES.get(key, key)
     return key if key in ENGINES else None
+
+
+# Conversational "good news!" must not become a search.
+_NEWS_NO = {"good", "bad", "great", "wonderful", "amazing", "funny", "sad",
+            "happy", "weird", "nice", "terrible", "horrible", "serious"}
+# A sentence that only happens to end in "news" is not a news request.
+_NEWS_STOP = {
+    "i", "you", "we", "he", "she", "it", "they", "me", "him", "her", "us",
+    "them", "have", "has", "had", "got", "there", "here", "is", "are", "was",
+    "were", "be", "been", "do", "does", "did", "can", "could", "will",
+    "would", "should", "may", "might", "must", "your", "our", "their",
+    "not", "just", "only", "real", "very", "with", "and", "or", "but",
+    "if", "up", "out", "on", "in", "at", "to", "of", "from", "that",
+    "this", "what", "when", "where", "who", "how", "why", "which",
+}
+_NEWS_WORD = re.compile(r"^[a-z][a-z0-9 -]{1,29}$", re.IGNORECASE)
+
+
+def _news_topic(text: str) -> str | None:
+    """'<topic> news' -> the topic, or None when this isn't a news request."""
+    m = _NEWS.match(text) or _NEWS_ABOUT.match(text)
+    if not m:
+        return None
+    words = m.group(1).split()
+    while words and words[0].lower() in FILLER:
+        words.pop(0)
+    while words and words[-1].lower() in FILLER:
+        words.pop()
+    topic = " ".join(words)
+    if not topic or len(words) > 4:
+        return None
+    if not _NEWS_WORD.match(topic) or topic.lower() in _NEWS_NO:
+        return None
+    if any(w.lower() in _NEWS_STOP for w in words):
+        return None
+    return topic
+
+
+def _news_step(low: str, orig: str) -> list[dict[str, Any]] | None:
+    """News card, no model: known topic -> feeds, anything else -> web_search."""
+    topic = _news_topic(low)
+    if topic is None:
+        return None
+    if topic_key(topic) is not None:
+        return [{"action": "get_news", "topic": topic}]
+    return [{"action": "web_search", "query": f"{topic} news"}]
 
 
 def _segment(orig: str, site: str | None) -> tuple[list[dict[str, Any]], str | None] | None:
@@ -135,6 +184,10 @@ def _segment(orig: str, site: str | None) -> tuple[list[dict[str, Any]], str | N
             key,
         )
 
+    news = _news_step(low, orig)
+    if news is not None:
+        return news, None
+
     m = _SEARCH.match(low)
     if m:
         key = site or "google"
@@ -153,8 +206,11 @@ def _segment(orig: str, site: str | None) -> tuple[list[dict[str, Any]], str | N
         if url:
             key = " ".join(arg.lower().split())
             return [{"action": "open_url", "url": url, "site": key}], key
-        if arg:
+        # Not a site and not an installed app: hand the segment to the model
+        # instead of a failure card ("open the gold chart on tradingview").
+        if arg and apps.match(arg) is not None:
             return [{"action": "open_app", "name": arg}], site
+        return None
 
     if _url_like(low):
         return [{"action": "open_url", "url": orig.strip()}], site

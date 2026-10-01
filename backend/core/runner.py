@@ -23,12 +23,15 @@ IDLE_TITLES: dict[str, str] = {
     "run_routine": "Running \u201c{name}\u201d",
     "play_youtube": "Finding \u201c{name}\u201d on YouTube",
     "whatsapp_message": "Preparing a WhatsApp to {name}",
+    "get_news": "Checking {name} news",
+    "web_search": "Searching the web for \u201c{name}\u201d",
 }
 
 
 def _new_action(kind: str, step: dict[str, Any], chat_id: str | None) -> dict[str, Any]:
     name = (
         step.get("query")
+        or step.get("topic")
         or step.get("name")
         or step.get("contact")
         or step.get("url")
@@ -77,6 +80,11 @@ def _phrase(kind: str, step: dict[str, Any], data: dict[str, Any]) -> str:
     if kind == "whatsapp_message":
         name = (data.get("contact") or {}).get("name") or step.get("contact")
         return f"opened a WhatsApp chat for {name}"
+    if kind == "get_news":
+        count = len(data.get("items") or [])
+        return f"showed {count} {step.get('topic') or 'news'} headlines"
+    if kind == "web_search":
+        return f"searched the web for \u201c{step.get('query')}\u201d"
     return ""
 
 

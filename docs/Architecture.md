@@ -30,17 +30,21 @@ Mot/
 ├── run.pyw               # double-click launcher
 ├── backend/
 │   ├── main.py           # FastAPI app + pywebview start
-│   ├── api/              # chat, chats, providers, apps, routines, contacts, actions
+│   ├── api/              # chat, chats, providers, apps, routines, contacts, feeds, drex, actions
 │   ├── core/llm.py       # litellm wrapper, model switching, streaming
 │   ├── core/fetch.py     # GET {base}/models (+ /api/tags), presets, tags
+│   ├── core/drex.py      # Drex client (stdlib urllib, injectable transport)
+│   ├── core/feeds.py     # data/feeds.json + RSS fetch, cache, 48 h window
 │   ├── core/router.py    # fast path: parse_parts -> (steps, segments it can't parse)
 │   ├── core/llm_router.py # LLM path: tool calling or strict JSON, validated, retried once
 │   ├── core/config.py    # config.json (providers) + keyring
 │   ├── core/contacts.py  # data/contacts.json (Settings > Contacts), conservative matching
 │   ├── core/db.py        # SQLite chats
-│   └── tools/            # one file per tool + registry.py
+│   └── tools/            # one file per tool + registry.py (news.py, websearch.py, …)
 ├── frontend/             # React app (src/, dist/)
-├── data/                 # mot.db, config.json, apps.json, routines.json, contacts.json (gitignored)
+├── data/                 # mot.db, config.json, apps.json, routines.json, contacts.json,
+│                         # feeds.json (gitignored)
+├── .env                  # DREX_API_KEY only — gitignored, never logged (see Drex)
 └── logs/
 ```
 
@@ -108,7 +112,7 @@ Two Phase 3.5 guards:
 
 ## LLM path (core/llm_router.py)
 For the leftover segments only:
-- Short system prompt (< 900 chars, built for 3B-4B local models): the tool list is passed as
+- Short system prompt (< 1000 chars, built for 3B-4B local models): the tool list is passed as
   native `tools=`; the prompt names only known **sites** and saved **routine** names — the app
   list is never in a prompt, the model writes the name and `open_app` resolves it with the same
   fuzzy match/aliases the fast path uses.
@@ -125,12 +129,45 @@ For the leftover segments only:
   *and* "search on youtube" still produces one tab.
 - The raw model reply (`content` + `tool_calls`) is logged as `LLM router raw [...]`.
 
+## Research (news / "why is X moving")
+`backend/core/feeds.py` owns `data/feeds.json` (`{topic: [url, …]}`): 8 s per request, feeds for
+a topic fetched in parallel (ThreadPoolExecutor, max 8), 10 min cache per topic (5 min for
+searches), dedupe by URL, newest first, last 48 h with a newest-first fallback when the window
+is empty. `feedparser` is imported lazily inside the fetch so a run that never reads news costs
+nothing.
+
+The model's tool calls never see their own results, so research is a **second completion**:
+1. Fast path first — `"<topic> news"` / `"gold news today"` runs `get_news` with NO model and
+   renders a news card (headlines + Summarize button). An unresolvable topic becomes
+   `web_search`; a sentence that merely ends in "news" ("good news") falls through to the model.
+2. `api/chat.py` runs the normal loop, then collects `llm_router.findings_from(actions)`
+   (title, source, age, URL per item; HTML stripped, 24 items max) and streams a second
+   completion built by `llm_router.research_messages()` with `RESEARCH_SYSTEM` — **tools are
+   never offered there**, so retrieved web text can never trigger an action.
+3. `llm_router.research_footer()` appends `*As of HH:MM*` and `*Context, not trading advice.*`
+   deterministically; the model never has to remember them. When a research reply exists the
+   `runner.summary()` prefix is suppressed (`chat.compose()` returns the reply alone).
+4. The Summarize button posts `ChatIn.findings` — fast path and router are both skipped and
+   the research completion runs on exactly those headlines.
+
+## Drex (backend/core/drex.py)
+`POST {base}/v1/systemone` with `Authorization: Bearer $DREX_API_KEY` → a calibrated
+probability per question (`answers.<id>.noul`). Stdlib urllib only, `transport` injectable for
+tests, `DrexError(message, code)` with codes `no_key auth busy timeout unreachable
+bad_request bad_response`. The key comes from the process env or a hand-rolled `.env` parser —
+**the one documented exception to keyring-only**: `C:\Mot\.env` is gitignored (`.env*`), never
+logged, never returned by an API, and only ever copied into the Authorization header.
+`POST /api/drex/check` is one canned round trip for the Settings > Drex button; a missing key
+points at `https://drex.nace.ai/dashboard/api-keys`.
+
 ## API (localhost)
 POST /api/chat (stream) · GET/POST/DELETE /api/chats · GET/POST/DELETE /api/providers ·
 PUT /api/providers/active · POST /api/providers/fetch · PUT /api/settings ·
 GET /api/actions (events) · POST /api/actions/{id} (confirm/cancel an install or a WhatsApp) ·
 GET/PUT /api/apps (+ POST /api/apps/rescan) · GET/POST/DELETE /api/routines ·
-GET/POST/DELETE /api/contacts (Settings > Contacts)
+GET/POST/DELETE /api/contacts (Settings > Contacts) ·
+GET/PUT /api/feeds + POST /api/feeds/test (Settings > Feeds) ·
+POST /api/drex/check (Settings > Drex)
 
 ## Voice (later)
 Mic -> faster-whisper (local, any language) -> text -> same router. Text-to-speech optional. No router change needed.

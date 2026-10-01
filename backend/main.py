@@ -15,7 +15,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import actions, apps as apps_api, chat, chats, contacts as contacts_api, providers, routines as routines_api
+from .api import (
+    actions,
+    apps as apps_api,
+    chat,
+    chats,
+    contacts as contacts_api,
+    drex,
+    feeds as feeds_api,
+    providers,
+    routines as routines_api,
+)
 from .core import config
 
 LOG_PATH = config.LOG_DIR / "mot.log"
@@ -74,6 +84,8 @@ def create_app() -> FastAPI:
     app.include_router(apps_api.router)
     app.include_router(routines_api.router)
     app.include_router(contacts_api.router)
+    app.include_router(feeds_api.router)
+    app.include_router(drex.router)
 
     _start_discovery()
 

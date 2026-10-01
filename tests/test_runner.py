@@ -259,3 +259,58 @@ def test_routines_crud(files):
 
     assert routines.delete(saved["id"]) is True
     assert routines.get(saved["id"]) is None
+
+
+# --- Phase 4: news cards ----------------------------------------------------
+
+def test_news_card_carries_headlines_for_the_frontend(files, monkeypatch):
+    from pathlib import Path
+
+    from backend.core import feeds, router, runner
+    from backend.tools import news as news_tool
+
+    monkeypatch.setattr(feeds, "FEEDS_PATH", Path("Z:/definitely/missing/feeds.json"))
+    monkeypatch.setattr(
+        news_tool, "items_for",
+        lambda topic, limit=8: [{"title": "Gold hits a high", "source": "Kitco",
+                                 "when": "2h", "url": "https://k/1", "snippet": ""}],
+    )
+    action = runner.run_steps(router.parse("gold news"))[0]
+
+    assert action["kind"] == "get_news"
+    assert action["status"] == "done"
+    assert action["detail"].startswith("as of ")
+    assert action["title"].endswith("headlines, newest first")
+    assert action["data"]["items"][0]["title"] == "Gold hits a high"
+    assert "gold headlines" in action["phrase"]
+
+
+def test_web_search_card_title_and_phrase(files, monkeypatch):
+    from backend.core import router, runner
+    from backend.tools import websearch
+
+    monkeypatch.setattr(websearch, "_search", lambda q, n: [  # noqa: ARG005
+        {"title": "Something", "source": "kitco.com", "when": "14:32",
+         "url": "https://k/1", "snippet": "x"}])
+    websearch._CACHE.clear()
+    action = runner.run_steps(router.parse("ai news"))[0]
+
+    assert action["kind"] == "web_search"
+    assert action["status"] == "done"
+    assert action["data"]["items"]
+    assert "searched the web" in action["phrase"]
+
+
+def test_a_failed_news_fetch_shows_a_hint_not_a_traceback(files, monkeypatch):
+    from backend.core import feeds, router, runner
+
+    def boom(url, timeout=0.0):  # noqa: ARG001
+        raise feeds.FeedError("Couldn't reach example.com.", "unreachable")
+
+    monkeypatch.setattr(feeds, "fetch_feed", boom)
+    monkeypatch.setattr(feeds, "load", lambda: {"gold": ["https://example.com/rss"]})
+    action = runner.run_steps(router.parse("gold news"))[0]
+
+    assert action["status"] == "failed"
+    assert action["detail"] == "Check your connection and try again."
+    assert "Traceback" not in action["message"]

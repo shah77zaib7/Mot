@@ -4,6 +4,8 @@ import { Check, Eye, EyeOff, Pencil, Plus, Refresh, Search, Trash, X } from './i
 import TagChip from './TagChip.jsx';
 import AppsPanel from './AppsPanel.jsx';
 import ContactsPanel from './ContactsPanel.jsx';
+import DrexPanel from './DrexPanel.jsx';
+import FeedsPanel from './FeedsPanel.jsx';
 import RoutinesPanel from './RoutinesPanel.jsx';
 
 const EMPTY_FORM = {
@@ -284,12 +286,14 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
           </button>
         </div>
 
-        <div className="flex gap-1 border-b border-line px-4 pt-2">
+        <div className="flex flex-wrap gap-1 border-b border-line px-4 pt-2">
           {[
             ['models', 'Models'],
             ['apps', 'Apps'],
             ['routines', 'Routines'],
             ['contacts', 'Contacts'],
+            ['feeds', 'Feeds'],
+            ['drex', 'Drex'],
             ['appearance', 'Appearance'],
           ].map(([key, label]) => (
             <button
@@ -608,6 +612,10 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
           {tab === 'routines' && <RoutinesPanel />}
 
           {tab === 'contacts' && <ContactsPanel />}
+
+          {tab === 'feeds' && <FeedsPanel />}
+
+          {tab === 'drex' && <DrexPanel />}
 
           {tab === 'appearance' && (
             <div className="space-y-2">

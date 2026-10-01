@@ -84,11 +84,29 @@ verified against the real opencode API instead (`space-bunny-free`): 19 of 20 ph
 Done when: "open youtube and play dilbar dilbar" opens one tab with the video and
 "whatsapp <name> hi" stops at a Confirm card. ✓ verified in the app (see Memory.md).
 
-## Phase 4 — Research and news
-- [ ] web_search and get_news (feeds for gold, silver, crypto, markets)
-- [ ] Short summaries with sources
-- [ ] Setting to edit the feeds list
-Done when: "crypto news today" and "why is gold moving" return a short sourced summary. Explanations are context, not advice.
+## Phase 4 — Research and news (+ Drex foundation)
+- [x] Drex foundation (Option 1): backend/core/drex.py (stdlib urllib, injectable transport) +
+      POST /api/drex/check + Settings > Drex button; DREX_API_KEY in gitignored .env, never logged
+      or returned. Live: HTTP 200, noul=0.9349, 0.97 s
+- [x] web_search(query, max_results=5) — ddgs, 5 min cache, RSS-pool fallback if ddgs is down
+- [x] get_news(topic) — RSS per topic (gold, silver, crypto, markets) from data/feeds.json;
+      feeds live-tested (Kitco 404 / Mining.com 403 / Yahoo stale dropped), 8 s timeout,
+      parallel fetch, 10 min cache, dedupe by URL, newest first, 48 h window with a
+      newest-first fallback, HTML stripped
+- [x] Fast path with no model: "<topic> news", "gold news today", "crypto news" -> news card
+      (headline, source, age, link that only opens on click) + Summarize button; unknown topic
+      falls back to web_search; sentences that merely end in "news" still reach the model
+- [x] Research path: get_news and/or web_search, then a SECOND streamed completion that turns
+      the findings into 4-6 short bullets with source names + links, an "As of HH:MM" line and
+      the deterministic "Context, not trading advice." footer; system prompt stays < 1000 chars
+- [x] Safety: web text treated as data never instructions (system prompt + RESEARCH_SYSTEM has
+      no tools), HTML stripped, snippets capped, only numbers present in the retrieved text
+- [x] Settings > Feeds: per-topic feed lists, add/remove feed or topic, Test feed, Save,
+      Restore defaults -> /api/feeds
+- [x] pytest: 193 green (mocked RSS + ddgs + fake Drex transport, no real network)
+Done when: "crypto news today" and "why is gold moving today" return a short sourced summary.
+✓ verified live on a running server (see Memory.md): instant card with no model call, 4 sourced
+bullets + footer, Summarize button, Drex check. Explanations are context, not advice.
 
 ## Phase 5 — Polish and auto-start
 - [ ] Optional auto-start with Windows (toggle in Settings)
