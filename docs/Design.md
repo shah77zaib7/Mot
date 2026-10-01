@@ -27,6 +27,18 @@ A card that could not reach any source swaps its status pill for a **Retry** but
 again, no model call).
 
 ## Settings (modal)
+- General (first tab): **"When I close the window"** — two radio cards, **Minimize to tray**
+  (default) and **Quit Mot**; clicking a card saves it, no Save button. The tray card's muted
+  line explains the one-time notice: the first close that only hides Mot pops a native box —
+  "Mot is still running. It is in the notification area next to the clock — click its icon to
+  bring the window back. Choose "Quit Mot" in that menu to close Mot for good." — recorded in
+  `tray_notice_shown`, never repeated. Then **"Show / hide Mot"**: a field holding the current
+  combo (Ctrl+Alt+M) with Save shortcut (Enter works too) and a muted line naming where the
+  shortcut works; if the combo is taken, `hotkey_error` appears under it in red — `"Ctrl+Alt+M"
+  is already used by another program. Pick a different shortcut.` — and the old shortcut stays. Then
+  **"Start Mot when I sign in"**: an off-by-default checkbox whose muted line says Mot starts
+  hidden in the tray and that only one entry for your own account is added. A muted footer
+  points at `data/config.json` and the registry.
 - Models: list of provider cards (name, host, model count, key "••••••••", active model chip) with Manage models / Edit / Delete. Delete asks for confirmation and also drops the key from keyring.
 - Add / Edit provider form, in order: provider name (auto-filled from the base URL host or a preset, editable) → API key (masked, show/hide) → base URL → preset chips (Ollama, LM Studio, OpenRouter, Groq, DeepSeek, NVIDIA, OpenAI, Custom) → Fetch models.
 - Fetch models shows a loading state, then a searchable checklist of models, each with a clickable tag chip (click sets Free or Paid and locks it), plus Select all / Select all free / Re-fetch / "Add model manually". No /models endpoint? The form offers manual entry instead.
@@ -52,8 +64,8 @@ again, no model call).
   a red line with the reason, and a missing key adds a link to `drex.nace.ai/dashboard/api-keys`.
 - Appearance: light / dark / system.
 
-The tab row (Models / Apps / Routines / Contacts / Feeds / Drex / Appearance) wraps onto a
-second line instead of scrolling; the active underline stays per-button.
+The tab row (General / Models / Apps / Routines / Contacts / Feeds / Drex / Appearance) wraps
+onto a second line instead of scrolling; the active underline stays per-button.
 
 ## Look
 - Font: system UI stack (Segoe UI Variable). Radius 12-16px. Soft borders, minimal shadows.
@@ -63,6 +75,13 @@ second line instead of scrolling; the active underline stays per-button.
 
 ## Behavior
 - Enter sends, Shift+Enter newline, Esc stops generation, Ctrl+K new chat.
+- One Mot at a time: a second launch (shortcut, Start Menu, auto-start) asks the running window to
+  come to the front and exits without a sound — never two windows, never two servers.
+- The X closes to the tray by default (the notice above explains it once); the tray menu is
+  Open Mot / Refresh news now / Quit Mot, left-click opens the window. Quit Mot ends everything:
+  no pythonw left behind.
+- The global shortcut (Ctrl+Alt+M) shows and hides the window from anywhere; Settings > General
+  changes it, and an in-use combo is refused politely instead of stealing the old one.
 - UI never freezes. Errors are friendly inline messages ("Ollama isn't running. Start it or pick another model.") with a fix button when possible.
 - Rate limit / quota (429): an amber banner "<model> hit its limit" with a Retry button and one-click chips for other saved models (free ones first) — clicking a chip switches model immediately.
 - Handles window resize (sensible minimum width). Keyboard accessible.

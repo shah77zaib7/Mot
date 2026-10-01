@@ -6,6 +6,7 @@ import AppsPanel from './AppsPanel.jsx';
 import ContactsPanel from './ContactsPanel.jsx';
 import DrexPanel from './DrexPanel.jsx';
 import FeedsPanel from './FeedsPanel.jsx';
+import GeneralPanel from './GeneralPanel.jsx';
 import RoutinesPanel from './RoutinesPanel.jsx';
 
 const EMPTY_FORM = {
@@ -288,6 +289,7 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
 
         <div className="flex flex-wrap gap-1 border-b border-line px-4 pt-2">
           {[
+            ['general', 'General'],
             ['models', 'Models'],
             ['apps', 'Apps'],
             ['routines', 'Routines'],
@@ -325,6 +327,8 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
               {note.text}
             </p>
           )}
+
+          {tab === 'general' && <GeneralPanel />}
 
           {tab === 'models' &&
             (view === 'form' ? (

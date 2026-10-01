@@ -141,8 +141,21 @@ count unchanged; "aj gold aur bitcoin pe kya update hai" -> one 12-item mixed ca
 03:07 PM.
 
 ## Phase 5 — Polish and auto-start
-- [ ] Optional auto-start with Windows (toggle in Settings)
-- [ ] Tray icon and hotkey to open Mot
+
+### 5A — Window behaviour (done)
+- [x] One Mot at a time — a second launch wakes the running window (from the tray or minimised)
+      to the front and exits silently; `--background` never pops a window
+- [x] Tray icon — Open Mot / Refresh news now / Quit Mot; left-click opens the window
+- [x] Settings > General — "When I close the window: minimize to tray (default) / quit", with a
+      one-time first-use notice; Quit Mot leaves zero pythonw processes
+- [x] Global hotkey Ctrl+Alt+M shows/hides from anywhere, changeable in Settings > General;
+      an in-use combo is refused politely and the old one stays
+- [x] Start with Windows toggle (default OFF) — HKCU Run key, pythonw + run.pyw + `--background`
+- [x] Startup stays light: lazy imports, window on screen in 3.1 s (measured)
+- [x] 23 tests with fakes for the registry / tray / hotkey (no test touches real Windows
+      settings); 261 green. Verified live through the Desktop shortcut.
+
+### 5B — Not started (wait for the user's explicit go-ahead)
 - [ ] Packaging (PyInstaller or similar)
 - [ ] Error-handling pass
 

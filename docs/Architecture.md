@@ -6,6 +6,8 @@
 - Shell: pywebview (native window, no browser tab, no terminal)
 - Models: litellm (one interface for all providers, including Ollama / LM Studio)
 - Storage: SQLite (chats), config.json (settings), keyring (API keys)
+- Tray: pystray + Pillow (icon, menu) — the only new dependencies; the hotkey and the single
+  instance are ctypes, no dependency
 - Search/news: ddgs (DuckDuckGo, no key) + feedparser (RSS)
 - YouTube: yt-dlp (`ytsearch1:` metadata lookup for play_youtube — no API key, no download)
 - Later: faster-whisper (local, multilingual voice)
@@ -28,12 +30,14 @@ The path taken is logged as `path=fast` / `path=llm` / `path=llm->chat`.
 Mot/
 ├── AGENTS.md, README.md, docs/
 ├── run.pyw               # double-click launcher — started by the Desktop shortcut, which calls
-│                         # pythonw.exe on it (Explorer's .pyw association opens IDLE)
+│                         # pythonw.exe on it (Explorer's .pyw association opens IDLE);
+│                         # one-instance gate + a plain-English crash box (never silence)
 ├── tools/                # make_shortcut.py (Desktop + Start Menu .lnk), mot_icon.py (assets/mot.ico)
 ├── assets/               # mot.ico: bold "M." on a dark rounded square, generated locally
 ├── backend/
-│   ├── main.py           # FastAPI app + pywebview start
-│   ├── api/              # chat, chats, providers, apps, routines, contacts, feeds, drex, actions
+│   ├── main.py           # FastAPI app + pywebview start (all heavy imports are lazy)
+│   ├── api/              # chat, chats, providers, apps, routines, contacts, feeds, drex, actions,
+│   │                     # general (Settings > General)
 │   ├── core/llm.py       # litellm wrapper, model switching, streaming
 │   ├── core/fetch.py     # GET {base}/models (+ /api/tags), presets, tags
 │   ├── core/drex.py      # Drex client (stdlib urllib, injectable transport)
@@ -43,7 +47,12 @@ Mot/
 │   ├── core/phrases.py   # data/news_phrases.json — "aj gold" etc., no model call
 │   ├── core/router.py    # fast path: parse_parts -> (steps, segments it can't parse)
 │   ├── core/llm_router.py # LLM path: tool calling or strict JSON, validated, retried once
-│   ├── core/config.py    # config.json (providers) + keyring
+│   ├── core/config.py    # config.json (providers + general) + keyring
+│   ├── core/singleinstance.py # named mutex + wake event: one Mot, second launch comes to front
+│   ├── core/windowctl.py # show / hide / toggle / quit, the X -> tray policy, the one-time notice
+│   ├── core/tray.py       # pystray icon (lazy): Open Mot / Refresh news now / Quit Mot
+│   ├── core/hotkey.py     # RegisterHotKey on a message-only window, no extra dependency
+│   ├── core/autostart.py  # HKCU ...\\CurrentVersion\\Run -> pythonw run.pyw --background
 │   ├── core/contacts.py  # data/contacts.json (Settings > Contacts), conservative matching
 │   ├── core/db.py        # SQLite chats
 │   └── tools/            # one file per tool + registry.py (news.py, websearch.py, …)
@@ -204,6 +213,48 @@ logged, never returned by an API, and only ever copied into the Authorization he
 `POST /api/drex/check` is one canned round trip for the Settings > Drex button; a missing key
 points at `https://drex.nace.ai/dashboard/api-keys`.
 
+## Window, tray and startup (backend/core/…)
+- **Startup** must stay light: `run.pyw` sets a timestamp, gates on the single instance, and
+  `backend/main.py` lazy-imports everything heavy inside functions (litellm ~10 s is only touched
+  when a model is actually called; pystray +PIL only for the icon; webview only for the window).
+  Two costs are irreducible: `import fastapi, uvicorn` (2.6 s measured, ~0.9 s with warm caches —
+  the server must answer before the window can load a page) and WebView2 starting (~2.5 s).
+  Measured end to end from the Desktop shortcut: **3.10 s warm, 8.78 s cold** (`--background`
+  12.42 s once on a loaded machine). The app logs its own number as
+  `startup: window on screen after N s`, and a broken path is obvious there — the hotkey thread
+  used to burn its whole 10 s timeout and pushed this to 14.08 s.
+- **One instance** (`singleinstance.py`, ctypes only): a named mutex plus an auto-reset event and
+  a daemon listener. The first `acquire()` wins and starts listening; a second launch opens the
+  event (so the first wakes and shows its window), steps aside and exits 0 — no second window, no
+  second server. `--background` acquires with `wake=False`, so auto-start never pops a window over
+  the one you are using. The gate runs in `run.pyw` before `check_frontend()`.
+- **Tray** (`tray.py`, pystray + Pillow — the only new dependencies, recorded in requirements.txt):
+  icon `assets/mot.ico`, left-click = Open Mot (the menu's `default=True` item), menu =
+  Open Mot / Refresh news now / Quit Mot. pystray's setup thread is non-daemon, so a failed start
+  releases its queue rather than hanging the process. Started after the window so the tray never
+  delays it; a tray failure is a warning, never a crash.
+- **The X** (`windowctl.py`): the pywebview `closing` event is cancellable — the handler named
+  `window` returns `False` to cancel. With `close_to_tray=true` (default) the close is cancelled
+  and the window hides to the tray; `tray_notice_shown` makes the one-time notice fire once.
+  `close_to_tray=false` lets the close through, which is the same path as the tray's Quit.
+  `hide()` is never called from the closing handler (it marshals with `Invoke` and would deadlock);
+  it runs on a short-lived daemon thread after the cancel.
+- **Hotkey** (`hotkey.py`, RegisterHotKey/UnregisterHotKey via ctypes — no new dependency):
+  a daemon thread prepares its thread id, creates a `STATIC` window on `HWND_MESSAGE`, registers,
+  then pumps messages. Because the window is message-only, `set()` can be called from any thread
+  (the API and the tray) and re-register in place. Taken → `WM_HOTKEY` is never received, the old
+  registration stays, and `GET /api/general` reports `hotkey_active=false` with `hotkey_error`
+  for the Settings line. `loop()` is guarded so a dead thread always wakes `start()`.
+- **Auto-start** (`autostart.py`): HKCU `...\CurrentVersion\Run` value `Mot` =
+  `"…\pythonw.exe" "C:\Mot\run.pyw" --background`. The registry is the source of truth (not
+  config.json), so an entry deleted by hand is reported as off. Turning it off removes that value
+  and touches nothing else; the default is off. Logging never prints a key — there is none here.
+- **Quit** (`windowctl.quit()`): sets `_quitting` so the next `closing` is accepted, then destroys
+  the window. `webview.start()` returning is the single shutdown point — `_shutdown()` stops the
+  shortcut, hides the tray, `ingest.stop()`s the feed thread, releases the single instance, then
+  stops the server. Order matters: the tray holds the UI thread, so it goes before the window.
+- **Config**: `config.json` keeps `close_to_tray`, `tray_notice_shown`, `hotkey` only.
+
 ## API (localhost)
 POST /api/chat (stream) · GET/POST/DELETE /api/chats · GET/POST/DELETE /api/providers ·
 PUT /api/providers/active · POST /api/providers/fetch · PUT /api/settings ·
@@ -212,6 +263,8 @@ GET/PUT /api/apps (+ POST /api/apps/rescan) · GET/POST/DELETE /api/routines ·
 GET/POST/DELETE /api/contacts (Settings > Contacts) ·
 GET/PUT /api/feeds + POST /api/feeds/test · PUT /api/feeds/ingest · POST /api/feeds/refresh
 (Settings > Feeds: feed lists, the background refresh interval/on-off and "Refresh now") ·
+GET/PUT /api/general (Settings > General: close-to-tray, the global shortcut — including
+`hotkey_active` / `hotkey_error` — and the auto-start toggle) ·
 POST /api/drex/check (Settings > Drex)
 
 ## Voice (later)

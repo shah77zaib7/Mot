@@ -3,6 +3,26 @@
 Update at the end of every session. Keep it short.
 
 ## Current status
+Phase 5A done (window behaviour): **one Mot at a time** (a second launch wakes the running window
+to the front and exits silently, `--background` never pops one), a **tray icon** (Open Mot /
+Refresh news now / Quit Mot, left-click opens the window), **Settings > General** as the first tab
+("When I close the window: minimize to tray (default) / Quit Mot", a one-time tray notice, the
+global shortcut and Start with Windows), the **Ctrl+Alt+M global hotkey** (ctypes RegisterHotKey,
+changeable, in-use combos refused politely), and an **auto-start toggle** (HKCU Run key, default
+OFF). Startup: `import fastapi, uvicorn` (2.6 s, ~0.9 s with warm caches) and WebView2 (~2.5 s)
+are the two irreducible costs — **3.10 s warm / 8.78 s cold** from the Desktop shortcut, logged by
+the app itself as `startup: window on screen after N s` (it was 14.08 s while the hotkey thread
+was broken; litellm's 9.9 s import stays lazy). 261 tests green (23 new, all fakes — no test
+touches real Windows settings). Verified live through the Desktop shortcut: the tray icon window
+is there and **its left click opens the window** (posting pystray's own `WM_NOTIFY`/`WM_LBUTTONUP`
+is how that was proven without a mouse); a second launch restored a **minimised** window to the
+front in 0.18 s leaving exactly 1 process, and `--background` starts hidden with the tray up and
+the window still hotkey-able; the hotkey toggled the window 4×; the X hid it (notice shown once,
+never twice) and a **scheduled feed refresh ran 15 min later while it was hidden**, process alive;
+auto-start wrote the Run key and removed it; Quit left **0 pythonw** and no crash.log. Final state
+left for the user: no process, no Run key, no crash.log, `close_to_tray=true`,
+`tray_notice_shown=false` (so the first-use notice still shows), interval back to 2 h, hotkey
+Ctrl+Alt+M, no scratch scripts.
 News feed work done: the reported bug ("Gold news today" answering as a plain model reply) is fixed
 at its root — **regenerate used to skip the fast path**, so the plan was empty and the model was
 asked with no tools at all. News requests are now case/punctuation tolerant, feed failures end in a
@@ -267,7 +287,56 @@ Phase 1, 1.5 and 2 (UI, providers, tools/routines) are done and still verified.
   `backend`): both cases showed the box, wrote crash.log, and exited after the box was dismissed.
   The sandbox was deleted afterwards.
 
+### Phase 5A — window behaviour
+- **`singleinstance.py`**: a named mutex + an auto-reset event + a daemon listener thread, wrapped
+  in `Instance` (`acquire(wake=True/False)`, `start_listener`, `notify`, `release`). The gate lives
+  in `run.pyw` **before** `check_frontend()` so a second double-click never touches the frontend
+  check; `--serve` skips it (dev runs `python -m backend.main --serve`), `--background` uses
+  `wake=False`. run.pyw now also drops a `note()` line into `logs/mot.log` when it steps aside —
+  pythonw has no console, and "I double-clicked and nothing happened" needed an answer. The gate
+  is a `one_instance()` function called **inside** the launcher's try, before `check_frontend()`
+  (it started life at module level, which would have made a gate failure silent — the one thing
+  run.pyw promises never to be).
+- **`windowctl.py` owns every show/hide decision** so the tray, the hotkey and the X cannot
+  disagree: `show()` (also `restore()`s when `_minimized`), `hide()`, `toggle()`, `quit()`,
+  `on_closing(window)` returning `False` to cancel, `notice_once()` with an injectable
+  `message_box`. `hide()` runs on a short daemon thread **after** the cancel because pywebview's
+  `hide()` marshals with `Invoke` unconditionally and would deadlock inside the closing handler.
+- **`tray.py`** lazy-imports pystray + Pillow inside `start()` (182 + 131 ms — only paid when the
+  tray is built), builds `Open Mot` / `Refresh news now` / `Quit Mot` with `Open Mot` as the
+  `default=True` item so pystray's left-click (`Icon.__call__`) runs it, and releases pystray's
+  non-daemon setup thread queue if `run()` fails — otherwise the process would never exit. Menu
+  callbacks take the icon as their first argument.
+- **`hotkey.py`**: `Win32` (ctypes surface), `parse`/`label`, `Hotkey` with `_loop`/`_work`/`set`/
+  `stop`. The window is `STATIC` on **`HWND_MESSAGE`** — message-only, so `set()` can be called
+  from the API or the tray thread and re-register in place. `_ready` is set twice: once the
+  registration is decided (so `start()`/`set()` may talk to the thread) and again in `_loop`'s
+  `finally`, so **any** failure still wakes `start()`.
+  - **Bug found live**: `ctypes.c_wparam` does not exist → `Win32()` raised *outside* the try, the
+    thread died silently, `start()` timed out after 10 s, and startup went 3.1 s → 14.08 s. Fixed
+    with `wintypes.WPARAM`/`LPARAM` and by wrapping the whole body in try/finally.
+- **`autostart.py`**: HKCU `...\CurrentVersion\Run`, value `Mot`, read the registry as the source
+  of truth (not config.json) so a hand-deleted key reports off; `set_enabled` logs the exact value
+  written and `enabled()` reads it back rather than trusting memory. Nothing else in the registry.
+- **Dependencies**: pystray>=0.19 + Pillow>=10.0 added to requirements.txt (both commented with
+  what needs them). The single instance, the hotkey and the auto-start are ctypes — no dependency.
+  `.agents/` and `skills-lock.json` added to `.gitignore`.
+- **`config.json` gained only** `close_to_tray` (default true), `tray_notice_shown` (default
+  false), `hotkey` (default `ctrl+alt+m`), via `general()` / `set_general()` in `core/config.py`
+  and `GET/PUT /api/general` (`backend/api/general.py`). Auto-start is deliberately **not** stored
+  there — the registry is the truth.
+- **Startup**: every heavy import in `backend/main.py` moved inside a function (measured:
+  litellm 9927 ms, pystray 182, webview 195 — all now paid only when used; `import fastapi,
+  uvicorn` wall-clock is 2.6 s cold / ~0.9 s warm because the server must answer before the
+  window can load a page, and it is the biggest remaining term). `_shutdown()` order is
+  shortcut → tray → ingest → windowctl → singleinstance → server: the tray holds the UI thread, so
+  it goes before the window, and the server goes last so nothing logs into a dead handler.
+
 ## Done
+- Phase 5A: window behaviour — `backend/core/{singleinstance,windowctl,tray,hotkey,autostart}.py`,
+  `backend/api/general.py`, `frontend/src/components/GeneralPanel.jsx` (first Settings tab),
+  `backend/main.py` rewritten for lazy imports + `--background`, `run.pyw` gate + `note()`,
+  `tests/test_general.py` (23 tests). Decisions above; Architecture.md and Design.md updated.
 - Phase 1: backend (core/config.py, core/db.py, core/llm.py, api/*), React UI (frontend/src),
   run.pyw, requirements.txt, README. data/mot.db + data/config.json created on first run.
 - Phase 1.5: core/fetch.py + api/providers.py (profiles.py deleted), Settings > Models rewritten,
@@ -403,9 +472,37 @@ Phase 1, 1.5 and 2 (UI, providers, tools/routines) are done and still verified.
   sources ok", and Refresh now moved it to **03:07 PM** with 0 failed.
 
 ## Next
-Phase 5 — **wait for the user's explicit go-ahead before starting anything.**
+Phase 5B (packaging + the error-handling pass) — **wait for the user's explicit go-ahead before
+starting anything.** Nothing from Phase 5B has been touched.
 
 ## Known issues / gotchas
+- **pywebview**: `events.closing` is cancellable and the handler must be named `window` (it
+  receives the window); returning `False` cancels. `hide()` marshals with `Invoke` unconditionally,
+  so calling it *from* the closing handler deadlocks — windowctl hides on a short daemon thread
+  after the cancel. `create_window(hidden=True)` does Show→Hide, so `events.shown` still fires and
+  is a safe place to time startup. `state` is an app-level dict: minimized is tracked through
+  `events.minimized` / `events.restored`, never by reading `state`.
+- **pystray**: `Icon.__call__` (its WM_LBUTTONUP) runs the menu's `default=True` item — that is
+  how left-click = Open Mot works. `run()` starts a **non-daemon** setup thread blocked on a
+  private queue; if `run()` throws, that queue must be released or the process never exits.
+  Menu callbacks take the icon as their first argument.
+- **`ctypes.c_wparam` / `c_lparam` do not exist** (use `ctypes.wintypes.WPARAM`/`LPARAM`). The
+  resulting `AttributeError` killed the hotkey thread *outside* its try, so `_ready` was never set
+  and `start()` blocked the whole launch for 10 s — startup 3.1 s → 14.08 s with only a WARNING to
+  show for it. Any thread that must report readiness needs an outer try/finally.
+- **Testing the one-time tray notice live needs `tray_notice_shown` reset first**
+  (`config.set_general({'tray_notice_shown': False})`). Once it is true no box ever appears again,
+  and a live check that expects one looks like a failure — that is exactly what happened here.
+- **Simulating Ctrl+Alt+M with `keybd_event` occasionally drops the chord** (one call in ~5).
+  Poll for the window and retry the combo up to ~4 times instead of sleeping once and asserting.
+- **Proving "the news thread keeps running while hidden" needs a real scheduled refresh** — there
+  is no API that restarts the ingest loop (`POST /api/feeds/refresh` runs on the API thread). Set
+  `interval_hours` to the minimum 0.25 **before** launching: the loop reads it right after each
+  refresh, so the next run lands 15 min after start. A harness/session restart kills pythonw
+  mid-wait and costs the whole run.
+- A second launch now writes `second launch: Mot is already running, asked it to come to the
+  front` into `logs/mot.log` (run.pyw `note()`), which is how to tell "nothing happened" from
+  "the gate did its job".
 - **Settings > Feeds → "Restore defaults" writes `DEFAULTS` (4 topics) over the curated
   `data/feeds.json` (gold/silver/crypto/markets + forex, 17 sources)**, because the tests pin
   `DEFAULTS` to the original four. `data/` is gitignored, so the curated list cannot be pulled back
@@ -464,6 +561,8 @@ Phase 5 — **wait for the user's explicit go-ahead before starting anything.**
 - Killing the app by filtering processes on a command-line string that contains that same string
   kills your own shell — filter on the process name instead (`Get-Process pythonw`).
 - pytest is a test-only dependency (in requirements.txt). Run: `python -m pytest tests -q`.
+  Phase 5A added **pystray>=0.19 and Pillow>=10.0** (the tray icon) — the only new runtime
+  dependencies; the single instance, the hotkey and the auto-start are pure ctypes.
 - `frontend/dist` must exist before launching: `cd frontend && npm install && npm run build`.
 - Test cleanup after any manual run: delete test chats and test providers/aliases, kill only the
   mock server. (Done after Phase 2 and Phase 3: 0 chats remain. The "opencode" provider STAYS —
@@ -474,8 +573,9 @@ Windows; Python 3.13.15 (3.11+ required), Node.js 24 LTS; Ollama for local model
 winget IDs: Python.Python.3.11, OpenJS.NodeJS.LTS, Ollama.Ollama
 Git: repo initialized this session (identity `shah77zaib7`), main tracks
 https://github.com/shah77zaib7/Mot.git. .gitignore is the AGENTS.md set: `.env`, `data/`,
-`logs/`, `node_modules/`, `dist/`, `__pycache__/`, `*.db` — so keys, chats, config and contacts
-never leave the machine. Commit per phase after the user confirms the phase works.
+`logs/`, `node_modules/`, `dist/`, `__pycache__/`, `*.db`, plus `.agents/` and `skills-lock.json`
+— so keys, chats, config and contacts never leave the machine.
+Commit per phase after the user confirms the phase works.
 How the user starts Mot: **double-click `Desktop\Mot.lnk`** (Start Menu has one too), created by
 `python tools\make_shortcut.py` → `pythonw.exe "C:\Mot\run.pyw"`, working dir `C:\Mot`, icon
 `assets\mot.ico`. Desktop = `C:\Users\SUNNY COMPUTER\Desktop`; both `.lnk` files are outside the

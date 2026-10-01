@@ -331,6 +331,46 @@ def set_theme(theme: str) -> None:
     save(config)
 
 
+# --- Settings > General (Phase 5A) ------------------------------------------
+
+GENERAL_DEFAULTS: dict[str, Any] = {
+    # True  -> the X hides Mot in the tray and the news keeps refreshing
+    # False -> the X really ends Mot
+    "close_to_tray": True,
+    # the one-time "Mot is still running, it is in the tray" notice
+    "tray_notice_shown": False,
+    "hotkey": "ctrl+alt+m",
+}
+
+
+def general() -> dict[str, Any]:
+    """Close behaviour, the global shortcut and the tray notice."""
+    cfg = load()
+    out = dict(GENERAL_DEFAULTS)
+    out["close_to_tray"] = bool(cfg.get("close_to_tray", out["close_to_tray"]))
+    out["tray_notice_shown"] = bool(
+        cfg.get("tray_notice_shown", out["tray_notice_shown"]))
+    saved = str(cfg.get("hotkey") or "").strip().lower()
+    out["hotkey"] = saved or GENERAL_DEFAULTS["hotkey"]
+    return out
+
+
+def set_general(patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge Settings > General into data/config.json and report the result."""
+    current = general()
+    if "close_to_tray" in patch:
+        current["close_to_tray"] = bool(patch["close_to_tray"])
+    if "tray_notice_shown" in patch:
+        current["tray_notice_shown"] = bool(patch["tray_notice_shown"])
+    if "hotkey" in patch:
+        saved = str(patch["hotkey"]).strip().lower()
+        current["hotkey"] = saved or GENERAL_DEFAULTS["hotkey"]
+    cfg = load()
+    cfg.update(current)
+    save(cfg)
+    return current
+
+
 # --- secrets (Windows Credential Manager via keyring) ----------------------
 
 def get_secret(ref: str) -> str | None:

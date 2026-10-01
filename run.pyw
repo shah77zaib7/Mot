@@ -8,16 +8,31 @@ logs/crash.log AND shows a plain-English message box — never silence.
 from __future__ import annotations
 
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+
+BOOT = time.perf_counter()  # for the "window on screen after N s" log line
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 CRASH_LOG = ROOT / "logs" / "crash.log"
+LOG_PATH = ROOT / "logs" / "mot.log"
 FRONTEND_INDEX = ROOT / "frontend" / "dist" / "index.html"
+
+
+def note(text: str) -> None:
+    """One line in logs/mot.log — pythonw has no console to say it on."""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} INFO mot: {text}\n")
+    except OSError:
+        pass
 
 
 def write_crash(text: str) -> None:
@@ -78,12 +93,34 @@ def check_frontend() -> None:
     )
 
 
+def one_instance() -> None:
+    """One Mot at a time, checked before anything heavy is imported.
+
+    A second launch pokes the running instance (so it comes to the front) and
+    leaves silently; `wake=False` under `--background` means auto-start never
+    pops a window over the one you are already using. `--serve` is the
+    developer's exception — backend.main does its own check there.
+
+    This runs inside the try below on purpose: if the check itself breaks, that
+    is a real failure and must reach crash.log and the message box, not vanish.
+    """
+    from backend.core import singleinstance
+
+    if "--serve" in sys.argv or singleinstance.acquire(
+        wake="--background" not in sys.argv
+    ):
+        return
+    note("second launch: Mot is already running, asked it to come to the front")
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
     try:
+        one_instance()
         check_frontend()
         from backend.main import main
 
-        main()
+        main(started=BOOT)
     except SystemExit:
         raise
     except BaseException as exc:  # noqa: BLE001 - report everything, never die silently

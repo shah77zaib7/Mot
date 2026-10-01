@@ -6,4 +6,6 @@ pywebview>=5.3
 yt-dlp>=2025.1        # play_youtube: ytsearch1: metadata lookup, no download
 ddgs>=9.0            # web_search: text results, no key
 feedparser>=6.0      # get_news: RSS/Atom feeds from data/feeds.json
+pystray>=0.19        # tray icon (Phase 5A): notification area menu
+Pillow>=10.0         # tray icon (Phase 5A): reads assets/mot.ico
 pytest>=8.0          # tests only (python -m pytest tests)

@@ -1,4 +1,10 @@
-"""FastAPI app, static frontend, and the pywebview desktop shell."""
+"""FastAPI app, static frontend, and the pywebview desktop shell.
+
+Every heavy import (fastapi, uvicorn, each router) lives inside the function
+that needs it: `run.pyw` imports this module before it knows whether another
+Mot is already running, so the module itself has to stay cheap. litellm is
+imported lazily by core.llm for the same reason — it costs ~10 s.
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,26 +15,7 @@ import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-
-from .api import (
-    actions,
-    apps as apps_api,
-    chat,
-    chats,
-    contacts as contacts_api,
-    drex,
-    feeds as feeds_api,
-    providers,
-    routines as routines_api,
-)
-from .core import config, ingest
-
-LOG_PATH = config.LOG_DIR / "mot.log"
+from typing import Any
 
 FALLBACK_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Mot</title>
@@ -44,14 +31,16 @@ code{background:#1a1c20;padding:2px 6px;border-radius:6px}</style></head>
 
 
 def setup_logging(quiet: bool = False) -> None:
+    from .core import config
+
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     if root.handlers:
         return
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3,
-                                       encoding="utf-8")
+    file_handler = RotatingFileHandler(config.LOG_DIR / "mot.log", maxBytes=1_000_000,
+                                       backupCount=2, encoding="utf-8")
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
     if not quiet and sys.stderr is not None:
@@ -75,7 +64,25 @@ def _start_discovery() -> None:
     threading.Thread(target=apps.rescan_if_stale, daemon=True).start()
 
 
-def create_app() -> FastAPI:
+def create_app() -> Any:
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+
+    from .api import (
+        actions,
+        apps as apps_api,
+        chat,
+        chats,
+        contacts as contacts_api,
+        drex,
+        feeds as feeds_api,
+        general as general_api,
+        providers,
+        routines as routines_api,
+    )
+    from .core import config
+
     app = FastAPI(title="Mot", docs_url=None, redoc_url=None)
     app.include_router(chat.router)
     app.include_router(chats.router)
@@ -85,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(routines_api.router)
     app.include_router(contacts_api.router)
     app.include_router(feeds_api.router)
+    app.include_router(general_api.router)
     app.include_router(drex.router)
 
     _start_discovery()
@@ -107,7 +115,7 @@ def create_app() -> FastAPI:
             return HTMLResponse(FALLBACK_PAGE)
 
     @app.middleware("http")
-    async def no_cache_for_index(request: Request, call_next):
+    async def no_cache_for_index(request, call_next):
         response = await call_next(request)
         if request.url.path == "/" or request.url.path.endswith(".html"):
             response.headers["Cache-Control"] = "no-cache"
@@ -122,18 +130,21 @@ def find_port() -> int:
         return int(sock.getsockname()[1])
 
 
-class _Server(uvicorn.Server):
-    def install_signal_handlers(self) -> None:  # runs in a thread, not main
-        pass
+def start_server(port: int) -> Any:
+    import uvicorn
 
+    class _Server(uvicorn.Server):
+        def install_signal_handlers(self) -> None:  # runs in a thread, not main
+            pass
 
-def start_server(port: int) -> _Server:
     server = _Server(_uvicorn_config(port))
     threading.Thread(target=server.run, daemon=True).start()
     return server
 
 
-def _uvicorn_config(port: int) -> uvicorn.Config:
+def _uvicorn_config(port: int) -> Any:
+    import uvicorn
+
     return uvicorn.Config(
         create_app(),
         host="127.0.0.1",
@@ -159,10 +170,10 @@ def wait_ready(port: int, timeout: float = 15.0) -> bool:
     return False
 
 
-def open_window(url: str, debug: bool = False) -> None:
+def create_window(url: str, hidden: bool = False) -> Any:
     import webview
 
-    webview.create_window(
+    return webview.create_window(
         "Mot",
         url,
         width=1200,
@@ -170,23 +181,88 @@ def open_window(url: str, debug: bool = False) -> None:
         min_size=(880, 560),
         background_color="#0c0d10",
         text_select=True,
+        hidden=hidden,
     )
+
+
+def run_gui(debug: bool = False) -> None:
+    """Blocks until the window really closes."""
+    import webview
+
     webview.start(debug=debug)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _refresh_feeds() -> None:
+    """Tray > Refresh news now: one pass, off the tray thread, with a balloon."""
+    from .core import ingest, tray
+
+    log = logging.getLogger("mot")
+    try:
+        result = ingest.refresh_now()
+    except Exception:  # noqa: BLE001 - a dead network must not kill the tray
+        log.warning("refresh from the tray failed", exc_info=True)
+        return
+    summary = ingest.status()
+    failed = summary.get("failed") or 0
+    log.info("refresh from the tray: %s", result)
+    if not result.get("ok"):
+        return
+    tray.notify(
+        f"{failed} of {summary.get('sources', 0)} sources failing."
+        if failed
+        else "All news sources answered."
+    )
+
+
+def _shutdown(server: Any) -> None:
+    from .core import hotkey, ingest, singleinstance, tray, windowctl
+
+    log = logging.getLogger("mot")
+    log.info("Mot is closing down")
+    for name, stop in (
+        ("global shortcut", hotkey.stop),
+        ("tray icon", tray.stop),
+        ("feed refresh", ingest.stop),
+        ("window handle", windowctl.detach),
+        ("single-instance lock", singleinstance.stop),
+    ):
+        try:
+            stop()
+        except Exception:  # noqa: BLE001 - one stuck piece must not block the rest
+            log.warning("could not stop the %s", name, exc_info=True)
+    try:
+        server.should_exit = True
+    except Exception:  # noqa: BLE001
+        log.warning("could not stop the server", exc_info=True)
+    log.info("Mot has stopped")
+
+
+def main(argv: list[str] | None = None, started: float | None = None) -> int:
     parser = argparse.ArgumentParser(description="Mot desktop app")
     parser.add_argument("--port", type=int, default=0, help="port (default: free port)")
     parser.add_argument("--serve", action="store_true",
                         help="run the server only, no window (for development)")
     parser.add_argument("--debug", action="store_true", help="open devtools in the window")
+    parser.add_argument("--background", action="store_true",
+                        help="start hidden in the tray (this is what auto-start uses)")
     args = parser.parse_args(argv)
 
+    boot = time.perf_counter() if started is None else started
     setup_logging(quiet=False)
+    log = logging.getLogger("mot")
+
+    from .core import config, hotkey, ingest, singleinstance, tray, windowctl
+
+    # One Mot at a time: the second launch has already been waved away by
+    # run.pyw, but a direct `python -m backend.main` lands here too.
+    if not args.serve and not singleinstance.acquire():
+        log.info("Mot is already running - asked it to come to the front")
+        return 0
+
     port = args.port or find_port()
-    start_server(port)
+    server = start_server(port)
     if not wait_ready(port):
-        logging.getLogger("mot").error("Server did not start on port %s", port)
+        log.error("Server did not start on port %s", port)
         raise RuntimeError(
             f"Mot's local server did not start on port {port}.\n"
             "Another program may already be using that port, or a Python package "
@@ -194,21 +270,42 @@ def main(argv: list[str] | None = None) -> None:
         )
     url = f"http://127.0.0.1:{port}/"
     ingest.start()  # one feed refresh now, then every interval_hours (default 2)
+
     if args.serve:
         print(f"Mot running at {url}")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            return
-    logging.getLogger("mot").info("Opening window at %s", url)
+            return 0
+
+    window = create_window(url, hidden=args.background)
+    windowctl.attach(window, hidden=args.background)
+    singleinstance.start_listener(windowctl.show)
+    tray.start(on_open=windowctl.show, on_refresh=_refresh_feeds,
+               on_quit=windowctl.quit)
+    hotkey.start(config.general()["hotkey"], windowctl.toggle)
+
+    def on_shown() -> None:
+        log.info("startup: window on screen after %.2f s", time.perf_counter() - boot)
+
     try:
-        open_window(url, debug=args.debug)
+        window.events.shown += on_shown
+        window.events.closing += windowctl.on_closing
+    except Exception:  # noqa: BLE001
+        log.warning("window events could not be hooked", exc_info=True)
+
+    log.info("Opening window at %s", url)
+    try:
+        run_gui(debug=args.debug)
     except Exception as exc:  # noqa: BLE001 - log it, then let the launcher show it
-        logging.getLogger("mot").exception("Could not open the window")
+        log.exception("Could not open the window")
         raise RuntimeError(
             f"Mot could not open its window: {exc}\n\nThe reason is in logs/mot.log."
         ) from exc
+    finally:
+        _shutdown(server)
+    return 0
 
 
 if __name__ == "__main__":
