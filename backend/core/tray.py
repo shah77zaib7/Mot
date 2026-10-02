@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from pathlib import Path
 from typing import Any, Callable
+
+from . import paths
 
 log = logging.getLogger("mot")
 
-ROOT = Path(__file__).resolve().parents[2]
-ICON_PATH = ROOT / "assets" / "mot.ico"
+ICON_PATH = paths.icon_path()
 
 _icon: Any = None
 _thread: threading.Thread | None = None

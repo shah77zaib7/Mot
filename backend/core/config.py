@@ -15,17 +15,17 @@ from __future__ import annotations
 import json
 import re
 import threading
-from pathlib import Path
 from typing import Any
 
 import keyring
 
+from . import paths
 from .fetch import is_ollama_base
 
-ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
-LOG_DIR = ROOT / "logs"
-FRONTEND_DIST = ROOT / "frontend" / "dist"
+ROOT = paths.program_root()
+DATA_DIR = paths.data_dir()
+LOG_DIR = paths.log_dir()
+FRONTEND_DIST = paths.frontend_dist()
 CONFIG_PATH = DATA_DIR / "config.json"
 
 SERVICE = "Mot"

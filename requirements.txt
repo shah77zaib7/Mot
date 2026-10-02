@@ -8,4 +8,5 @@ ddgs>=9.0            # web_search: text results, no key
 feedparser>=6.0      # get_news: RSS/Atom feeds from data/feeds.json
 pystray>=0.19        # tray icon (Phase 5A): notification area menu
 Pillow>=10.0         # tray icon (Phase 5A): reads assets/mot.ico
+pyinstaller>=6.10    # packaging (Phase 5B): build tool only, never imported by Mot
 pytest>=8.0          # tests only (python -m pytest tests)

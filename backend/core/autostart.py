@@ -14,9 +14,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 log = logging.getLogger("mot")
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = paths.program_root()
 KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "Mot"
 

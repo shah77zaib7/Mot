@@ -15,10 +15,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from . import paths
+
 BASE_URL = "https://drex.nace.ai"
 MODEL = "drex-v1.5"
 TIMEOUT = 15.0
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = paths.program_root()
 ENV_PATH = ROOT / ".env"
 DASHBOARD = "https://drex.nace.ai/dashboard/api-keys"
 

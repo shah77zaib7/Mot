@@ -3,6 +3,30 @@
 Update at the end of every session. Keep it short.
 
 ## Current status
+**Phase 5B-1 (foundations) is complete, waiting for the user's review.** Data now lives in
+`%APPDATA%\Mot` with everything routed through `backend/core/paths.py` (`MOT_DATA_DIR` overrides
+it for tests); `backend/core/migrate.py` moves a legacy `C:\Mot\data` folder on first run — copies
+only what is missing, writes `C:\Mot\data-backup-<timestamp>`, logs `failed: []`, and when it must
+leave something behind it warns loudly with every skipped item and both paths. Errors are friendly
+end to end (`backend/core/errors.py`, frontend `ErrorBoundary` + `report.js` + a friendlier
+`api.js`), `mot.log` rotates and a traceback also lands in `crash.log`, `db.close()` runs last, and
+the splash is on screen in 538 ms warm / 1385 ms first run with WebView2 failures explained
+instead of swallowed. 289 tests green (`tests/test_paths.py` adds 28, including the
+"destination already has data" regression). **Verified live through the Desktop shortcut with the
+migrated data**: chat list restored, `"Gold news today"` → 8-headline news card `path=fast`,
+**WhatsApp Confirm card cancelled** ("Cancelled — nothing was sent"), the model switched to the
+temporary opencode provider so the LLM path actually ran (`path=llm actions=['whatsapp_message']`),
+hotkey Ctrl+Alt+M hid *and* showed the window, close-to-tray hid the window while the process
+stayed alive, and quit logged `Mot is closing down` → `Mot has stopped` with **0 pythonw** and no
+crash.log. Startup after migration: splash 538 ms, window on screen 4.85 s. Final state left for
+the user: config byte-for-byte back to its original values (theme `system`,
+`close_to_tray=true`, hotkey Ctrl+alt+m, only `p-local-ollama` / `qwen2.5:7b` active), 0 chats and
+0 messages (the test chats were deleted), no processes running.
+**One thing I broke and could not undo:** the keyring entry `mot-p-opencode` is gone. It existed
+before this session (an orphan left by an earlier provider removal), my temporary provider reused
+that account name as its `key_ref`, and deleting the provider deleted the key with it. Nothing else
+was lost — no file, no config value. The user must re-add the opencode provider in Settings >
+Models and paste the key again.
 Phase 5A done (window behaviour): **one Mot at a time** (a second launch wakes the running window
 to the front and exits silently, `--background` never pops one), a **tray icon** (Open Mot /
 Refresh news now / Quit Mot, left-click opens the window), **Settings > General** as the first tab
@@ -472,8 +496,18 @@ Phase 1, 1.5 and 2 (UI, providers, tools/routines) are done and still verified.
   sources ok", and Refresh now moved it to **03:07 PM** with 0 failed.
 
 ## Next
-Phase 5B (packaging + the error-handling pass) — **wait for the user's explicit go-ahead before
-starting anything.** Nothing from Phase 5B has been touched.
+Phase 5B-1 is finished — **wait for the user's explicit go-ahead before starting the next phase.**
+Nothing beyond 5B-1 has been touched.
+
+Execution order (new numbers, old number in brackets), as written in `docs/Phases.md`:
+`5B-1 Foundations -> 6 Reliability -> 7 Memory -> 8A Hear / 8B Speak [old 6] -> 9 Packaging
+[old 5B-2] -> 10A Smart ranking / 10B Alerts and briefing [old 8] -> 11 Research providers
+[old 9] -> 12 Screen control [old 7]`.
+
+Phase 6 (Reliability) is the next one: ordered fallback list in Settings > Models, cooldowns on
+429 / timeout / 5xx / 404, >=10 s timeouts, a switch notice, runtime-generated capabilities line,
+UTF-8 logs tested with Urdu + emoji, an accent picker, and proof that a model can never confirm
+its own install or WhatsApp card.
 
 ## Known issues / gotchas
 - **pywebview**: `events.closing` is cancellable and the handler must be named `window` (it

@@ -3,7 +3,10 @@
 Explorer may open .pyw files in IDLE, so the supported way to start Mot is the
 Desktop shortcut (python tools\\make_shortcut.py), which calls pythonw.exe on this
 file directly. However Mot is started, a startup failure here always writes
-logs/crash.log AND shows a plain-English message box — never silence.
+crash.log AND shows a plain-English message box — never silence.
+
+Paths: program files live next to this file, the user's data and logs live in
+`backend/core/paths.py` (%APPDATA%\\Mot). Nothing here hardcodes a folder.
 """
 from __future__ import annotations
 
@@ -19,13 +22,16 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-CRASH_LOG = ROOT / "logs" / "crash.log"
-LOG_PATH = ROOT / "logs" / "mot.log"
-FRONTEND_INDEX = ROOT / "frontend" / "dist" / "index.html"
+from backend.core import paths  # noqa: E402 - stdlib only, safe this early
+
+# Program files stay next to run.pyw; the log lives with the user's data.
+FRONTEND_INDEX = paths.frontend_dist() / "index.html"
+CRASH_LOG = paths.log_dir() / "crash.log"
+LOG_PATH = paths.log_dir() / "mot.log"
 
 
 def note(text: str) -> None:
-    """One line in logs/mot.log — pythonw has no console to say it on."""
+    """One line in mot.log — pythonw has no console to say it on."""
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -36,12 +42,22 @@ def note(text: str) -> None:
 
 
 def write_crash(text: str) -> None:
-    """Append to logs/crash.log — the only record pythonw leaves behind."""
+    """Append to crash.log — the only record pythonw leaves behind."""
     try:
         CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
         with CRASH_LOG.open("a", encoding="utf-8") as handle:
             handle.write(text)
     except OSError:
+        pass
+
+
+def close_splash() -> None:
+    """Take the starting window down — a no-op when there is none."""
+    try:
+        from backend.core import splash
+
+        splash.close()
+    except Exception:  # noqa: BLE001 - never let cleanup hide the real error
         pass
 
 
@@ -124,8 +140,11 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException as exc:  # noqa: BLE001 - report everything, never die silently
+        close_splash()  # take it down before the error box appears
         detail = "".join(traceback.format_exception(exc)).rstrip()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         write_crash(f"\n=== {stamp} ===\n{detail}\n")
         message_box(friendly(exc))
         sys.exit(1)
+    finally:
+        close_splash()

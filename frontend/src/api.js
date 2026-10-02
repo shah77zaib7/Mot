@@ -1,11 +1,42 @@
 // Thin JSON + SSE client for the Mot backend (same origin).
 
+// fetch() only ever rejects when the network itself failed — never with a
+// readable reason — so the sentence has to come from here.
+export const OFFLINE =
+  "Mot can't reach its own server. It may still be starting up \u2014 try again in a moment.";
+
+function networkError() {
+  const error = new Error(OFFLINE);
+  error.offline = true;
+  return error;
+}
+
+async function get(path, init) {
+  try {
+    return await fetch(path, init);
+  } catch {
+    throw networkError();
+  }
+}
+
+function messageFrom(data, status) {
+  const detail = data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (typeof data?.message === 'string' && data.message.trim()) return data.message;
+  return `Mot could not finish that request (error ${status}).`;
+}
+
 export async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw networkError();
+  }
   const text = await res.text();
   let data = null;
   try {
@@ -14,7 +45,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     /* non-JSON body */
   }
   if (!res.ok) {
-    throw new Error(data?.detail || data?.message || `Request failed (${res.status})`);
+    throw new Error(messageFrom(data, res.status));
   }
   return data;
 }
@@ -48,7 +79,7 @@ async function* readEvents(res) {
 
 // POST /api/chat -> async iterator of parsed SSE events.
 export async function* streamChat(payload, signal) {
-  const res = await fetch('/api/chat', {
+  const res = await get('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(payload),
@@ -56,14 +87,13 @@ export async function* streamChat(payload, signal) {
   });
 
   if (!res.ok || !res.body) {
-    let message = `Request failed (${res.status})`;
+    let data = null;
     try {
-      const data = await res.json();
-      message = data.detail || data.message || message;
+      data = await res.json();
     } catch {
       /* keep default */
     }
-    throw new Error(message);
+    throw new Error(messageFrom(data, res.status));
   }
 
   yield* readEvents(res);

@@ -21,7 +21,7 @@ Mot is a personal AI agent for Windows with a clean chat interface. Type (later:
 - No arbitrary shell/PowerShell execution.
 - No shared branding or code with other products; Mot for Windows is its own project.
 - No account, no telemetry. Data stays on the laptop except calls to the model provider the user chose.
-- No screen-clicking agent until the final optional phase.
+- No screen-clicking agent until Phase 12, the final optional phase.
 
 ## Success measures
 - A routine runs in under 10 seconds with no model call.

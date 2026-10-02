@@ -155,15 +155,138 @@ count unchanged; "aj gold aur bitcoin pe kya update hai" -> one 12-item mixed ca
 - [x] 23 tests with fakes for the registry / tray / hotkey (no test touches real Windows
       settings); 261 green. Verified live through the Desktop shortcut.
 
-### 5B — Not started (wait for the user's explicit go-ahead)
-- [ ] Packaging (PyInstaller or similar)
-- [ ] Error-handling pass
+### 5B-1 — Foundations (current)
+- [x] Single data root: user data lives in `%APPDATA%\Mot`, program files come from
+      `paths.program_root()`, `MOT_DATA_DIR` points tests at a temp folder
+- [x] First-run migration out of the legacy `C:\Mot\data` — copies only what is missing,
+      writes a backup next to the source, reports `failed: []`
+- [x] Migration never overwrites; a destination that already has data is called out loud in
+      the log with the source and backup paths
+- [x] Friendly errors: backend `errors.py` codes, frontend `report.js` / `ErrorBoundary` /
+      `api.js` show a sentence instead of a traceback
+- [x] Rotating `logs/mot.log` + a crash log, and `api/log.py` so the browser can report too
+- [x] Splash on screen early (538 ms warm, 1385 ms first run), WebView2 detected with a
+      friendly failure instead of a silent one
+- [x] `db.close()` last in shutdown; the log ends `Mot is closing down` -> `Mot has stopped`
+- [x] `tests/test_paths.py` (28 tests) including the migration "already has data" regression;
+      suite 289 green
+- [x] Verified live through the Desktop shortcut with the migrated data: chat list, news card,
+      WhatsApp Confirm card then **Cancel** ("Cancelled — nothing was sent"), hotkey Ctrl+Alt+M
+      show *and* hide, close-to-tray keeps the process alive, graceful quit leaves zero
+      pythonw and no crash.log
+- [ ] docs/Architecture.md documents the new paths and the new data location
+- [ ] Done when: a first run moves old data safely, every failure shows a friendly sentence,
+      and Quit leaves nothing running
 
-## Phase 6 — Voice (user's language)
-- [ ] Mic button -> faster-whisper local, language selectable or auto
-- [ ] Voice goes through the same router
-- [ ] Optional text-to-speech
+## Execution order
 
-## Phase 7 — Screen control (optional)
-- [ ] Screenshot-based control only as a fallback for things tools can't do
-- [ ] Always confirm before acting; big Stop button
+`5B-1 -> 6 -> 7 -> 8A -> 8B -> 9 -> 10A -> 10B -> 11 -> 12`
+
+Numbers are new; the old number is in brackets. Stop at the end of a phase and wait for the
+user's explicit go-ahead before starting the next one.
+
+## Phase 6 — Reliability
+- [ ] Ordered fallback list in Settings > Models — drag models into the order the router should try
+- [ ] On 429 / timeout / 5xx / 404 the router moves to the next model and cools the failed one
+      down (~5 min for quota, ~30 min for 5xx and timeouts, ~6 h for 404)
+- [ ] Every LLM call has a timeout of at least 10 s
+- [ ] A small notice in the chat when the model switched, and why
+- [ ] Manual switching still works, and the existing limit banner still works
+- [ ] The capabilities line inside the ~1000-char prompt is generated at runtime from the
+      current model — never hard-coded
+- [ ] Logs are UTF-8, tested with Urdu and roman-Urdu plus emoji
+- [ ] A model can never confirm its own install or WhatsApp card — Confirm only ever comes
+      from the UI
+- [ ] Accent picker in Settings > Appearance that changes `--accent`
+- Done when: the first model in the list is forced to fail, the next one answers, and the
+  failed one stays skipped for its cooldown.
+
+## Phase 7 — Memory
+- [ ] `facts(key, value, category, updated_at)` plus FTS5 over past messages
+- [ ] Prompt core (~1000 chars of identity and recent facts) plus a key index
+- [ ] `recall_memory(query)` tool
+- [ ] Save facts only from the user's own messages, with a "Saved: …" chip and Undo
+- [ ] Never save passwords, API keys or card numbers
+- [ ] Settings > Memory: list with date, edit, delete one, delete all, and "forget X" in chat
+- [ ] Optional end-of-chat summary plus a rolling summary for long chats
+- [ ] Stays local — document where it lives
+- Done when: a fact saved in one chat is recalled in a new chat, and deleting it makes Mot
+  forget it.
+
+## Phase 8A — Hear [old 6]
+- [ ] Push-to-talk, default Ctrl+Space, changeable
+- [ ] STT providers in Settings > Voice: local faster-whisper (tiny/base/small, int8, CPU)
+      with the real measured speed, or an OpenAI-compatible endpoint with the key in keyring
+- [ ] Language auto-detect plus a manual choice
+- [ ] Mic picker by device name with a live level meter
+- [ ] Orb states: idle / listening / thinking
+- Done when: speaking in the user's language fills the input box and the fast path runs it.
+
+## Phase 8B — Speak [old 6]
+- [ ] TTS providers: Windows voices, Piper offline if a voice exists, Edge-TTS — each tested
+      live for the user's language, and failures dropped
+- [ ] Echo guard: the mic closes while Mot is speaking
+- [ ] Stop button plus a "stop" voice command
+- [ ] Short spoken acknowledgement for slow tasks
+- [ ] Speaker picker by name; orb "speaking"
+- [ ] Wake word optional/later, local only (openWakeWord), off by default
+- Done when: Mot speaks the user's language back and "stop" ends it.
+
+## Phase 9 — Packaging [old 5B-2]
+- [ ] One PyInstaller (or similar) build into `build/`, never shipped from the source tree
+- [ ] The build script must be re-runnable — a second run works without hand-cleaning
+- [ ] Report size, startup time and every blocker found
+- [ ] Desktop shortcut + `pythonw.exe run.pyw` still work from the built app
+- Done when: a build runs twice in a row from scratch and the report is written up.
+
+## Phase 10A — Smart news ranking [old 8]
+- [ ] Keep the existing Drex spec: score and order headlines so the useful ones come first
+- [ ] Ranking is deterministic — no model call on the hot path
+- [ ] Explainable: a headline can say why it ranked where it did
+- Done when: the same snapshot always ranks the same way, and the top of the list is the part
+  the user would have scrolled to.
+
+## Phase 10B — Alerts and briefing [old 8]
+- [ ] One Windows toast helper used everywhere
+- [ ] Toast on a high-importance headline as it lands
+- [ ] Keyword watchlist the user edits in Settings
+- [ ] Morning briefing card built from the news snapshot (no extra fetching)
+- [ ] Timers and reminders ("remind me in 20 minutes") on the same helper
+- Done when: a matching headline raises a toast and "remind me in 20 minutes" comes back in
+  20 minutes.
+
+## Phase 11 — Research providers (TinyFish, Firecrawl) [old 9]
+- [ ] Provider tools behind the same tool interface as `web_search`
+- [ ] Keys in keyring only; a provider the user has no key for is simply not offered
+- [ ] Falls back to what Phase 4 already does when a provider is missing or fails
+- [ ] No new hard dependency on any one provider
+- Done when: research runs the same shape of answer with a provider configured, and without one.
+
+## Phase 12 — Screen control [old 7]
+- [ ] browser-use (MIT) as a pip dependency, run in a separate helper process with its own
+      venv, talking to Mot over localhost. Never copy its source into Mot; keep its licence
+      notice.
+- [ ] Spike first: 3 saved models x 5 simple tasks, reporting success rate / steps / tokens /
+      time. A local 3B model is expected to fail — that result is part of the report.
+- [ ] Map Mot's provider profiles onto its wrappers; no provider-specific code in Mot
+- [ ] Dedicated Mot browser profile by default; real Chrome/Brave only on opt-in, with a warning
+- [ ] The Confirm card is issued by the UI, never by the model, before submit / send / post /
+      purchase / login. Domain deny-list covering trading, brokerage and exchange sites, plus
+      an optional allow-list. Page content is untrusted and no credentials ever go in prompts.
+- [ ] Max steps / minutes / token-cost caps in Settings > Browser agent, a live step log card
+      with Stop, and everything written to `logs/`
+- [ ] Entry only via an explicit `browse: …` message — never automatic, and the fast path is
+      tried first
+- [ ] Feature flag off by default; the helper is removable without touching the rest of Mot
+- Done when: the spike report exists, a browse task completes under its caps with a working
+  Confirm/Stop, and turning the flag off leaves no trace in the UI.
+
+## Version 2.0 — parked ideas
+
+Not scheduled. Listed so they are not lost.
+- Clipboard assistant: copy text → translate / summarise / explain / fix
+- Drop-in plugins
+- Undo, once file tools exist
+- Optional Playwright browser automation
+- Phone remote
+- Anything else we park along the way

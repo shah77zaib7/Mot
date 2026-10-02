@@ -10,7 +10,7 @@
   instance are ctypes, no dependency
 - Search/news: ddgs (DuckDuckGo, no key) + feedparser (RSS)
 - YouTube: yt-dlp (`ytsearch1:` metadata lookup for play_youtube — no API key, no download)
-- Later: faster-whisper (local, multilingual voice)
+- Phase 8A/8B: faster-whisper (local, multilingual voice) + text-to-speech
 
 ## Flow
 ```
@@ -57,11 +57,33 @@ Mot/
 │   ├── core/db.py        # SQLite chats
 │   └── tools/            # one file per tool + registry.py (news.py, websearch.py, …)
 ├── frontend/             # React app (src/, dist/)
-├── data/                 # mot.db, config.json, apps.json, routines.json, contacts.json,
-│                         # feeds.json (gitignored)
+├── data/                 # LEGACY first-run location — migrated into %APPDATA%\Mot, never
+│                         # written to after that (gitignored)
 ├── .env                  # DREX_API_KEY only — gitignored, never logged (see Drex)
-└── logs/
+└── logs/                 # program-side logs next to the code (see "Where data lives")
 ```
+
+## Where data lives
+Nothing picks a data path by hand: `backend/core/paths.py` is the only place that decides.
+
+| Kind | Comes from | Example |
+|---|---|---|
+| User data | `paths.data_dir()` | `%APPDATA%\Mot\mot.db`, `config.json`, `contacts.json`, `feeds.json`, `apps.json`, `routines.json`, `news_phrases.json`, `market_ingest/` |
+| Logs | `paths.log_dir()` | `%APPDATA%\Mot\logs\mot.log`, `crash.log` |
+| Program files (code, assets, `frontend/dist`) | `paths.program_root()` | `C:\Mot\` |
+
+- `MOT_DATA_DIR` overrides the whole data folder. That is what the tests use — a temp
+  directory per run, so no test ever touches real user data.
+- **First run migrates the legacy location**: if `%APPDATA%\Mot` has no `mot.db` and
+  `C:\Mot\data` does, `backend/core/migrate.py` copies only the files that are missing,
+  writes `C:\Mot\data-backup-<timestamp>` next to the source, and logs
+  `copied N item(s), M already there, backup at …`. It never overwrites a destination that
+  already has data; when it has to leave something behind it logs a WARNING naming every
+  skipped item with its source and backup path. The result is logged too (`failed: []`).
+- The migration runs after the splash is up and before the window is created, so the user
+  never sees an empty app on a machine that already had data.
+- Everything logs through `paths.log_dir()`; `mot.log` rotates, and a traceback also lands in
+  `crash.log`. Secrets are never logged.
 
 ## Providers and models (data/config.json)
 ```json
@@ -267,5 +289,5 @@ GET/PUT /api/general (Settings > General: close-to-tray, the global shortcut —
 `hotkey_active` / `hotkey_error` — and the auto-start toggle) ·
 POST /api/drex/check (Settings > Drex)
 
-## Voice (later)
+## Voice (Phase 8A / 8B)
 Mic -> faster-whisper (local, any language) -> text -> same router. Text-to-speech optional. No router change needed.

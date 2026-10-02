@@ -19,8 +19,15 @@ Read these before coding:
 
 ## Code rules
 - Python 3.11+, type hints, small functions, small files. Simple over clever.
+- **Never hardcode a data or log path.** User data lives in `%APPDATA%\Mot` and
+  everything goes through `backend/core/paths.py` (`paths.data_dir()`,
+  `paths.log_dir()`); `MOT_DATA_DIR` overrides the whole folder — that is what
+  the tests use. Program files (code, assets, frontend/dist) come from
+  `paths.program_root()`.
 - Frontend: React + Vite + Tailwind. No heavy UI libraries unless truly needed.
 - Add a dependency only if necessary. Record it in requirements.txt / package.json and in Memory.md.
+- Never copy code from third-party repositories; their licenses may restrict Mot. Implement from
+  the specs in docs/ in your own words.
 - Windows first: use pathlib, no Linux-only commands.
 - Log to logs/mot.log. Never log secrets.
 

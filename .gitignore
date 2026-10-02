@@ -1,8 +1,10 @@
 ﻿.env*
 data/
+data-backup-*/
 logs/
 node_modules/
 dist/
+build/
 __pycache__/
 *.db
 .agents/

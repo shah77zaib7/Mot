@@ -30,6 +30,10 @@ code{background:#1a1c20;padding:2px 6px;border-radius:6px}</style></head>
 </div></body></html>"""
 
 
+LOG_MAX_BYTES = 5_000_000  # mot.log rotates at ~5 MB, keeping 3 older files
+LOG_BACKUPS = 3
+
+
 def setup_logging(quiet: bool = False) -> None:
     from .core import config
 
@@ -39,8 +43,10 @@ def setup_logging(quiet: bool = False) -> None:
     if root.handlers:
         return
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(config.LOG_DIR / "mot.log", maxBytes=1_000_000,
-                                       backupCount=2, encoding="utf-8")
+    file_handler = RotatingFileHandler(config.LOG_DIR / "mot.log",
+                                       maxBytes=LOG_MAX_BYTES,
+                                       backupCount=LOG_BACKUPS,
+                                       encoding="utf-8")
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
     if not quiet and sys.stderr is not None:
@@ -66,7 +72,7 @@ def _start_discovery() -> None:
 
 def create_app() -> Any:
     from fastapi import FastAPI, Request
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 
     from .api import (
@@ -78,10 +84,11 @@ def create_app() -> Any:
         drex,
         feeds as feeds_api,
         general as general_api,
+        log as log_api,
         providers,
         routines as routines_api,
     )
-    from .core import config
+    from .core import config, errors
 
     app = FastAPI(title="Mot", docs_url=None, redoc_url=None)
     app.include_router(chat.router)
@@ -94,6 +101,28 @@ def create_app() -> Any:
     app.include_router(feeds_api.router)
     app.include_router(general_api.router)
     app.include_router(drex.router)
+    app.include_router(log_api.router)
+
+    # Nothing reaches the UI as a stack trace: the traceback goes to
+    # logs/mot.log and the caller gets one plain-English sentence.
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> Any:
+        logging.getLogger("mot").error("Unhandled error on %s %s",
+                                       request.method, request.url.path,
+                                       exc_info=exc)
+        return JSONResponse(status_code=500,
+                            content=errors.describe(request.url.path, exc))
+
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(request: Request, exc: RequestValidationError) -> Any:
+        logging.getLogger("mot").warning("Bad request on %s: %s",
+                                         request.url.path, exc.errors())
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Mot did not understand that request.",
+                     "path": request.url.path})
 
     _start_discovery()
 
@@ -215,11 +244,13 @@ def _refresh_feeds() -> None:
 
 
 def _shutdown(server: Any) -> None:
-    from .core import hotkey, ingest, singleinstance, tray, windowctl
+    from .core import db, hotkey, ingest, singleinstance, splash, tray
+    from .core import windowctl
 
     log = logging.getLogger("mot")
     log.info("Mot is closing down")
     for name, stop in (
+        ("starting splash", splash.close),
         ("global shortcut", hotkey.stop),
         ("tray icon", tray.stop),
         ("feed refresh", ingest.stop),
@@ -234,6 +265,7 @@ def _shutdown(server: Any) -> None:
         server.should_exit = True
     except Exception:  # noqa: BLE001
         log.warning("could not stop the server", exc_info=True)
+    db.close()  # last: everything that could still write to it has stopped
     log.info("Mot has stopped")
 
 
@@ -251,13 +283,33 @@ def main(argv: list[str] | None = None, started: float | None = None) -> int:
     setup_logging(quiet=False)
     log = logging.getLogger("mot")
 
-    from .core import config, hotkey, ingest, singleinstance, tray, windowctl
+    # Splash first: it only needs ctypes, and it has to beat keyring, the feed
+    # modules and the server — the user should see something within ~100 ms.
+    from .core import splash
+
+    if not args.serve and not args.background:
+        splash.show(started=boot)
+
+    from .core import config, hotkey, ingest, migrate, singleinstance, tray
+    from .core import webview2, windowctl
+
+    # Move the old data folder into its new home first, so nothing below ever
+    # reads a path from two different places. A failure raises one
+    # plain-English error for the launcher to show — the old data is read-only.
+    migrate.ensure()
 
     # One Mot at a time: the second launch has already been waved away by
     # run.pyw, but a direct `python -m backend.main` lands here too.
     if not args.serve and not singleinstance.acquire():
         log.info("Mot is already running - asked it to come to the front")
+        splash.close()
         return 0
+
+    if not args.serve:
+        problem = webview2.missing_message()
+        if problem:
+            log.error("WebView2 runtime is missing - Mot cannot open a window")
+            raise RuntimeError(problem)
 
     port = args.port or find_port()
     server = start_server(port)
@@ -266,7 +318,7 @@ def main(argv: list[str] | None = None, started: float | None = None) -> int:
         raise RuntimeError(
             f"Mot's local server did not start on port {port}.\n"
             "Another program may already be using that port, or a Python package "
-            "is missing.\nThe reason is in logs/mot.log."
+            f"is missing.\nThe reason is in {config.LOG_DIR / 'mot.log'}."
         )
     url = f"http://127.0.0.1:{port}/"
     ingest.start()  # one feed refresh now, then every interval_hours (default 2)
@@ -278,6 +330,8 @@ def main(argv: list[str] | None = None, started: float | None = None) -> int:
                 time.sleep(1)
         except KeyboardInterrupt:
             return 0
+        finally:
+            _shutdown(server)  # Ctrl+C still stops the threads and the DB
 
     window = create_window(url, hidden=args.background)
     windowctl.attach(window, hidden=args.background)
@@ -287,6 +341,7 @@ def main(argv: list[str] | None = None, started: float | None = None) -> int:
     hotkey.start(config.general()["hotkey"], windowctl.toggle)
 
     def on_shown() -> None:
+        splash.close()  # the real window is here; the waiting window goes
         log.info("startup: window on screen after %.2f s", time.perf_counter() - boot)
 
     try:
@@ -301,7 +356,8 @@ def main(argv: list[str] | None = None, started: float | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - log it, then let the launcher show it
         log.exception("Could not open the window")
         raise RuntimeError(
-            f"Mot could not open its window: {exc}\n\nThe reason is in logs/mot.log."
+            f"Mot could not open its window: {exc}\n\n"
+            f"The reason is in {config.LOG_DIR / 'mot.log'}."
         ) from exc
     finally:
         _shutdown(server)

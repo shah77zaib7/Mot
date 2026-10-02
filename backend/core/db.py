@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -14,6 +15,20 @@ from .config import DATA_DIR
 DB_PATH: Path = DATA_DIR / "mot.db"
 _LOCK = threading.Lock()
 _CONN: sqlite3.Connection | None = None
+
+
+def close() -> None:
+    """Shut the connection so SQLite checkpoints the WAL and releases the file."""
+    global _CONN
+    with _LOCK:
+        if _CONN is None:
+            return
+        conn, _CONN = _CONN, None
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - closing must never fail a shutdown
+            logging.getLogger("mot").warning("could not close the database",
+                                             exc_info=True)
 
 
 def _conn() -> sqlite3.Connection:
