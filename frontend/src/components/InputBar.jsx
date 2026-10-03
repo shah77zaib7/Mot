@@ -10,6 +10,7 @@ export default function InputBar({
   busy,
   providers,
   active,
+  resting,
   onModelChange,
   onOpenSettings,
 }) {
@@ -48,6 +49,7 @@ export default function InputBar({
           <ModelMenu
             providers={providers}
             active={active}
+            resting={resting}
             onPick={onModelChange}
             onOpenSettings={onOpenSettings}
           />

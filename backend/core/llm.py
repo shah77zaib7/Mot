@@ -7,26 +7,48 @@ from typing import Any, AsyncIterator
 
 from . import config
 
-REQUEST_TIMEOUT = 120.0
+REQUEST_TIMEOUT = 120.0  # seconds handed to litellm
+MIN_TIMEOUT = 10.0  # no LLM call may ever wait for less than this (Phase 6)
+
+
+def timeout() -> float:
+    """The ceiling every LLM call is given — always >= 10 s."""
+    return max(MIN_TIMEOUT, REQUEST_TIMEOUT)
 
 
 class LLMError(Exception):
     """A model error worth showing to the user, with an optional fix hint."""
 
-    def __init__(self, message: str, fix: str | None = None, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        fix: str | None = None,
+        code: str | None = None,
+        kind: str | None = None,
+        models: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.fix = fix  # "settings" opens the Settings modal
-        self.code = code  # "rate_limit" gets its own banner with a Retry button
+        self.code = code  # "rate_limit" / "fallback_exhausted" get their own banner
+        self.kind = kind  # what fallback.classify() keys a cooldown off
+        self.models = models  # per-model reasons when every candidate failed
 
 
 def friendly(exc: BaseException, profile: dict[str, Any]) -> LLMError:
     """Turn a litellm/provider exception into a short, human sentence."""
     text = str(exc).lower()
+    status = _status(exc)
     api_base = (profile.get("api_base") or "").lower()
     local = any(h in api_base for h in ("localhost", "127.0.0.1", "::1"))
     name = profile.get("name") or "this model"
 
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return LLMError(
+            f"{name} took too long to answer. The model may still be loading — try again.",
+            fix="settings",
+            kind="timeout",
+        )
     if any(
         s in text
         for s in ("connection refused", "connect call failed", "failed to establish",
@@ -46,40 +68,65 @@ def friendly(exc: BaseException, profile: dict[str, Any]) -> LLMError:
         return LLMError(
             f"{name} took too long to answer. The model may still be loading — try again.",
             fix="settings",
+            kind="timeout",
         )
     if any(s in text for s in ("429", "rate limit", "rate_limit", "ratelimit",
                                "too many requests", "quota", "exceeded your limit",
-                               "insufficient balance", "billing")):
+                               "insufficient balance", "billing")) or status == 429:
         return LLMError(
             "The provider hit its rate limit or quota. Wait a moment and try again, "
             "or switch to another model.",
             code="rate_limit",
+            kind="rate_limit",
+        )
+    if status in (500, 502, 503, 504, 529) or any(
+        s in text for s in ("internal server error", "bad gateway",
+                            "service unavailable", "server error")
+    ):
+        return LLMError(
+            f"{name} had a server error. Try again in a moment, or switch to another model.",
+            kind="server",
         )
     if any(s in text for s in ("401", "403", "unauthorized", "invalid api key",
-                               "incorrect api key", "authentication", "permission denied")):
+                               "incorrect api key", "authentication", "permission denied"
+                               )) or status in (401, 403):
         return LLMError(
-            "That API key was rejected. Update it in Settings.",
+            f"Key invalid for {name}. Update it in Settings.",
             fix="settings",
+            kind="key_invalid",
         )
     if any(s in text for s in ("missing credentials", "api_key", "api key",
                                "workload_identity", "openai_api_key")):
         return LLMError(
             f"No API key for '{name}'. Add one in Settings.",
             fix="settings",
+            kind="no_key",
         )
     if any(s in text for s in ("404", "not found", "does not exist", "no such model",
-                               "model_not_found", "pull")):
+                               "model_not_found", "pull")) or status == 404:
         return LLMError(
             f"Model '{profile.get('label') or profile.get('model')}' isn't available on "
             f"{name}. Check the model list in Settings.",
             fix="settings",
+            kind="not_found",
         )
     if "api key" in text and profile.get("key_ref"):
         return LLMError("No API key is stored for this provider. Add one in Settings.",
-                        fix="settings")
+                        fix="settings", kind="no_key")
 
     short = " ".join(str(exc).split())[:300]
     return LLMError(f"Something went wrong talking to {name}: {short}")
+
+
+def _status(exc: BaseException) -> int | None:
+    """HTTP status off an exception when the client bothered to attach one."""
+    for attr in ("status_code", "http_status", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and 100 <= value < 600:
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
 
 
 def _litellm():
@@ -108,8 +155,6 @@ async def probe_reachable(profile: dict[str, Any]) -> LLMError | None:
     target = "127.0.0.1" if host == "localhost" else host
     local = host in ("localhost", "127.0.0.1", "::1")
 
-    # Remote hosts get one quick retry: a dropped TCP connection must not turn a
-    # working reply into an error. Local servers keep failing fast.
     # Remote hosts get one quick retry: a dropped TCP connection must not turn a
     # working reply into an error. Local servers keep failing fast.
     for _ in range(1 if local else 2):
@@ -167,6 +212,29 @@ def _history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
 
 
+async def _await_call(coro: Any, profile: dict[str, Any]) -> Any:
+    """litellm's own timeout is not enough — a hung connect must still end."""
+    try:
+        return await asyncio.wait_for(coro, timeout())
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        raise friendly(exc, profile) from exc
+
+
+async def _first_chunk(stream: Any, profile: dict[str, Any]) -> Any | None:
+    """Next piece of a stream, or None when it is finished. Never hangs."""
+    iterator = stream.__aiter__()
+    try:
+        return await asyncio.wait_for(iterator.__anext__(), timeout())
+    except StopAsyncIteration:
+        return None
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        raise friendly(exc, profile) from exc
+    except LLMError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - mapped to a friendly message
+        raise friendly(exc, profile) from exc
+
+
 async def stream_chat(
     profile: dict[str, Any],
     messages: list[dict[str, str]],
@@ -178,28 +246,28 @@ async def stream_chat(
     kwargs = _kwargs(profile)
     litellm = _litellm()
     try:
-        stream = await litellm.acompletion(
-            messages=_history(messages),
-            stream=True,
-            timeout=REQUEST_TIMEOUT,
-            **kwargs,
+        stream = await _await_call(
+            litellm.acompletion(
+                messages=_history(messages),
+                stream=True,
+                timeout=timeout(),
+                **kwargs,
+            ),
+            profile,
         )
     except LLMError:
         raise
     except Exception as exc:  # noqa: BLE001 - mapped to a friendly message
         raise friendly(exc, profile) from exc
 
-    try:
-        async for chunk in stream:
-            delta = ""
-            try:
-                delta = chunk.choices[0].delta.content or ""
-            except (AttributeError, IndexError, KeyError):
-                continue
-            if delta:
-                yield delta
-    except LLMError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise friendly(exc, profile) from exc
+    while True:
+        chunk = await _first_chunk(stream, profile)
+        if chunk is None:
+            return
+        try:
+            delta = chunk.choices[0].delta.content or ""
+        except (AttributeError, IndexError, KeyError):
+            continue
+        if delta:
+            yield delta
 

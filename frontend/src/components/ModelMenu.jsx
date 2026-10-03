@@ -2,10 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Gear, Search } from './icons.jsx';
 import TagChip from './TagChip.jsx';
 
+function clock(seconds) {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 // Model picker: grouped by provider, searchable, tag chips on every model.
-export default function ModelMenu({ providers, active, onPick, onOpenSettings }) {
+// Models on cooldown show a "resting" chip with the time left (Phase 6).
+export default function ModelMenu({ providers, active, resting = [], onPick, onOpenSettings }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [now, setNow] = useState(() => Date.now());
   const rootRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -29,9 +35,36 @@ export default function ModelMenu({ providers, active, onPick, onOpenSettings })
 
   const total = providers.reduce((count, p) => count + p.models.length, 0);
 
+  // When each resting model becomes usable again — the clock starts on arrival.
+  const restingUntil = useMemo(() => {
+    const map = new Map();
+    (resting || []).forEach((entry) => {
+      map.set(
+        `${entry.provider_id}|${entry.model_id}`,
+        Date.now() + Math.max(0, entry.seconds || 0) * 1000
+      );
+    });
+    return map;
+  }, [resting]);
+
+  const restLeft = (providerId, modelId) => {
+    const until = restingUntil.get(`${providerId}|${modelId}`);
+    if (!until) return null;
+    const left = Math.ceil((until - now) / 1000);
+    return left > 0 ? left : null;
+  };
+
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open]);
+
+  // Tick only while the list is open: the countdown costs nothing when closed.
+  useEffect(() => {
+    if (!open || restingUntil.size === 0) return undefined;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [open, restingUntil]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -112,6 +145,14 @@ export default function ModelMenu({ providers, active, onPick, onOpenSettings })
                       }`}
                     >
                       <span className="min-w-0 flex-1 truncate">{model.id}</span>
+                      {restLeft(provider.id, model.id) !== null && (
+                        <span
+                          className="shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                          title="Resting after an error — skipped for now"
+                        >
+                          resting {clock(restLeft(provider.id, model.id))}
+                        </span>
+                      )}
                       <TagChip tag={model.tag} />
                     </button>
                   );

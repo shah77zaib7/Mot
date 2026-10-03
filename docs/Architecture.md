@@ -38,7 +38,9 @@ Mot/
 │   ├── main.py           # FastAPI app + pywebview start (all heavy imports are lazy)
 │   ├── api/              # chat, chats, providers, apps, routines, contacts, feeds, drex, actions,
 │   │                     # general (Settings > General)
-│   ├── core/llm.py       # litellm wrapper, model switching, streaming
+│   ├── core/llm.py       # litellm wrapper, model switching, streaming, timeouts, error kinds
+│   ├── core/fallback.py  # Phase 6: ordered candidates, cooldowns, switch notices, routing
+│   ├── core/capabilities.py # Phase 6: "Can: … / Cannot: …" built from the tool registry
 │   ├── core/fetch.py     # GET {base}/models (+ /api/tags), presets, tags
 │   ├── core/drex.py      # Drex client (stdlib urllib, injectable transport)
 │   ├── core/feeds.py     # data/feeds.json + RSS fetch, cache, 48 h window, refresh_all/read_topic
@@ -83,13 +85,20 @@ Nothing picks a data path by hand: `backend/core/paths.py` is the only place tha
 - The migration runs after the splash is up and before the window is created, so the user
   never sees an empty app on a machine that already had data.
 - Everything logs through `paths.log_dir()`; `mot.log` rotates, and a traceback also lands in
-  `crash.log`. Secrets are never logged.
+  `crash.log`. Secrets are never logged. Files are written UTF-8 explicitly
+  (`encoding="utf-8", errors="replace"`), so Urdu and emoji survive — covered by
+  `tests/test_logs_utf8.py`.
 
 ## Providers and models (data/config.json)
 ```json
 {
   "active": {"provider_id": "p-local-ollama", "model_id": "qwen2.5:7b"},
   "theme": "system",
+  "accent": "#14b8a6",
+  "fallback": [
+    {"provider_id": "p-local-ollama", "model_id": "qwen2.5:7b", "auto": true},
+    {"provider_id": "p-mock", "model_id": "ok-model", "auto": true}
+  ],
   "providers": [
     {"id": "p-local-ollama", "name": "Local Ollama", "base_url": "http://localhost:11434",
      "key_ref": null,
@@ -99,8 +108,16 @@ Nothing picks a data path by hand: `backend/core/paths.py` is the only place tha
 ```
 - One provider holds many models. `tag` is `free | paid | local | unknown`; `tag_locked`
   means the user set it by hand, so a re-fetch never overwrites it.
-- API keys live in keyring under `mot-<provider id>`; this file and every API response only
-  ever carry `has_key` / a `••••••••` mask. `key_ref` is the keyring *account name*, not a key.
+- API keys live in keyring under a **unique** ref, `mot-<provider id>-<random 8 hex>`; this file
+  and every API response only ever carry `has_key` / a `••••••••` mask. `key_ref` is the keyring
+  *account name*, not a key. Two providers can never collide, and `delete_provider()` only
+  deletes the key when no other provider still shares that ref.
+- `accent` is the Settings > Appearance colour (`#rrggbb`, validated by `ACCENT_RE`, default
+  `#14b8a6`); the frontend paints `--accent`, `--accent-strong` and `--accent-ink` from it.
+- `fallback` is the **auto-switch order** (Settings > Models): first entry is tried first, and
+  `auto` is the "allow auto-switch into this model" tick. A Paid-tagged model stores `auto:false`
+  unless the user ticks it, so Mot never silently spends money. Entries with no tick are still
+  offered for manual picking.
 - The **backend** fetches the model list (the browser never calls the provider):
   `GET {base_url}/models`, then `{origin}/models`, then `{origin}/api/tags` (Ollama).
   Presets and tag rules live in `backend/core/fetch.py`.
@@ -149,10 +166,15 @@ Two Phase 3.5 guards:
 
 ## LLM path (core/llm_router.py)
 For the leftover segments only:
-- Short system prompt (< 1000 chars, built for 3B-4B local models): the tool list is passed as
-  native `tools=`; the prompt names only known **sites** and saved **routine** names — the app
-  list is never in a prompt, the model writes the name and `open_app` resolves it with the same
-  fuzzy match/aliases the fast path uses.
+- Short system prompt (< 1000 chars, `PROMPT_BUDGET`, built for 3B-4B local models): the tool
+  list is passed as native `tools=`; the prompt names only known **sites** and saved **routine**
+  names — the app list is never in a prompt, the model writes the name and `open_app` resolves it
+  with the same fuzzy match/aliases the fast path uses.
+- The capabilities line is generated at **runtime** by `core/capabilities.py` from
+  `registry.TOOLS`: a `Can:` half (one verb per registered tool) and a `Cannot:` half (fixed
+  safety rules plus "confirm its own actions"). Adding or removing a tool changes the prompt on
+  the next request — no prompt string is ever maintained by hand. `_fit()` truncates the
+  Known websites / Saved routines lists to keep the whole `_system()` under the budget.
 - Native tool calling first. If the provider rejects `tools=` (or the model just writes JSON),
   fall back to a strict `{"steps":[...]} / {"reply":"..."}` answer; that provider stays in JSON
   mode for the session (`_JSON_ONLY`).
@@ -165,6 +187,34 @@ For the leftover segments only:
 - Model steps go through `router.drop_covered_opens()` too, so a model that says "open youtube"
   *and* "search on youtube" still produces one tab.
 - The raw model reply (`content` + `tool_calls`) is logged as `LLM router raw [...]`.
+
+## Model fallback and timeouts (core/fallback.py, core/llm.py)
+Every LLM call is routed through `fallback`, so a sick model costs one attempt, not a hang:
+- **Timeouts.** `llm.timeout()` = `max(MIN_TIMEOUT = 10.0 s, REQUEST_TIMEOUT)` and is enforced
+  with `asyncio.wait_for` around both the first chunk and every later chunk (`_await_call`,
+  `_first_chunk`). A model that never answers is a friendly error, never a stuck UI.
+- **Error kinds.** `llm.friendly()` classifies the failure into
+  `rate_limit | timeout | server | not_found | key_invalid` (carried on `LLMError.kind`);
+  connection refused / unreachable and anything else stays `kind=None` and is shown as before.
+- **Cooldowns** (`fallback.COOLDOWN`, in-memory only, cleared on restart):
+  429 → 300 s, timeout and 5xx → 1800 s, 404 → 21600 s, 401/403 → `key_invalid` with **0 s**
+  (switch immediately but do not rest it — the key may be fixed any second).
+- **`candidates(target)`** puts the requested model first (unless it is cooling), then walks
+  `config.fallback_list()` skipping unticked, cooling and duplicate entries — the list is walked
+  **once**, so a request can never loop. An empty list falls back to `[target]`.
+- **`route()`** returns `{decision, profile, notices}`; a switch appends a notice built by
+  `fallback.notice()` — `"fail-429 hit its limit, switched to ok-model"` — which `api/chat.py`
+  emits as an SSE `switch` event above the reply. When every candidate fails,
+  `fallback.exhausted()` produces a friendly list of each model and why it failed, plus a Retry
+  (`fallback_exhausted` on the error event).
+- **`fallback.stream()`** yields `("notice", text)` then `("delta", text)`. It only switches
+  **before** the first delta; once text is on screen it re-raises rather than splicing two
+  models' replies together.
+- **Manual switching always works**: picking a resting model in the picker calls
+  `POST /api/providers/wake` → `fallback.wake()`, which clears just that model's cooldown.
+  Cooldowns only ever filter *automatic* moves, and they are reported to the UI as
+  `resting: [{model_id, left}]` so the picker can show `resting m:ss`.
+- **Paid models** are never switched into unless their `auto` tick is set.
 
 ## Research (news / "why is X moving")
 `backend/core/feeds.py` owns `data/feeds.json` (`{topic: [url, …]}`): 8 s per request, feeds for
@@ -279,7 +329,9 @@ points at `https://drex.nace.ai/dashboard/api-keys`.
 
 ## API (localhost)
 POST /api/chat (stream) · GET/POST/DELETE /api/chats · GET/POST/DELETE /api/providers ·
-PUT /api/providers/active · POST /api/providers/fetch · PUT /api/settings ·
+PUT /api/providers/active · POST /api/providers/fetch · PUT /api/settings (theme + accent) ·
+PUT /api/fallback (the auto-switch order and its ticks) · POST /api/providers/wake (clear one
+model's cooldown — how picking a resting model by hand still works) ·
 GET /api/actions (events) · POST /api/actions/{id} (confirm/cancel an install or a WhatsApp) ·
 GET/PUT /api/apps (+ POST /api/apps/rescan) · GET/POST/DELETE /api/routines ·
 GET/POST/DELETE /api/contacts (Settings > Contacts) ·

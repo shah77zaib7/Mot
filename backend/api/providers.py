@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..core import config, fetch
+from ..core import config, fallback, fetch
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -37,7 +37,17 @@ class FetchIn(BaseModel):
 
 
 class ThemeIn(BaseModel):
-    theme: str
+    theme: str | None = None
+    accent: str | None = None
+
+
+class FallbackIn(BaseModel):
+    models: list[dict] = []
+
+
+class WakeIn(BaseModel):
+    provider_id: str
+    model_id: str
 
 
 def _active() -> dict[str, Any] | None:
@@ -54,6 +64,9 @@ def get_providers() -> dict:
         "providers": config.list_providers(),
         "active": _active(),
         "theme": cfg.get("theme", "system"),
+        "accent": config.accent(),
+        "fallback": config.fallback_list(),
+        "resting": fallback.resting(),
         "presets": fetch.PRESETS,
     }
 
@@ -81,6 +94,13 @@ def set_active(body: ActiveIn) -> dict:
     return {"active": _active()}
 
 
+@router.post("/providers/wake")
+def wake_model(body: WakeIn) -> dict:
+    """Hand-picking a resting model ends its cooldown right away."""
+    fallback.wake(body.provider_id, body.model_id)
+    return {"resting": fallback.resting()}
+
+
 @router.post("/providers/fetch")
 async def fetch_models(body: FetchIn) -> dict:
     """Ask the provider for its model list. The browser never calls it."""
@@ -96,5 +116,16 @@ async def fetch_models(body: FetchIn) -> dict:
 
 @router.put("/settings")
 def update_settings(body: ThemeIn) -> dict:
-    config.set_theme(body.theme)
-    return {"theme": config.load().get("theme", "system")}
+    """Both fields are optional: the UI sends whichever one just changed."""
+    if body.theme is not None:
+        config.set_theme(body.theme)
+    if body.accent is not None:
+        config.set_accent(body.accent)
+    cfg = config.load()
+    return {"theme": cfg.get("theme", "system"), "accent": config.accent()}
+
+
+@router.put("/fallback")
+def update_fallback(body: FallbackIn) -> dict:
+    """Save the auto-switch order and its 'allow auto-switch' ticks."""
+    return {"fallback": config.set_fallback(body.models)}

@@ -186,20 +186,26 @@ Numbers are new; the old number is in brackets. Stop at the end of a phase and w
 user's explicit go-ahead before starting the next one.
 
 ## Phase 6 — Reliability
-- [ ] Ordered fallback list in Settings > Models — drag models into the order the router should try
-- [ ] On 429 / timeout / 5xx / 404 the router moves to the next model and cools the failed one
+- [x] Ordered fallback list in Settings > Models — reorder the list the router should try
+      (↑/↓ buttons instead of drag: works without a pointer and needs no drag library)
+- [x] On 429 / timeout / 5xx / 404 the router moves to the next model and cools the failed one
       down (~5 min for quota, ~30 min for 5xx and timeouts, ~6 h for 404)
-- [ ] Every LLM call has a timeout of at least 10 s
-- [ ] A small notice in the chat when the model switched, and why
-- [ ] Manual switching still works, and the existing limit banner still works
-- [ ] The capabilities line inside the ~1000-char prompt is generated at runtime from the
+- [x] Every LLM call has a timeout of at least 10 s
+- [x] A small notice in the chat when the model switched, and why
+- [x] Manual switching still works, and the existing limit banner still works
+- [x] The capabilities line inside the ~1000-char prompt is generated at runtime from the
       current model — never hard-coded
-- [ ] Logs are UTF-8, tested with Urdu and roman-Urdu plus emoji
-- [ ] A model can never confirm its own install or WhatsApp card — Confirm only ever comes
+- [x] Logs are UTF-8, tested with Urdu and roman-Urdu plus emoji
+- [x] A model can never confirm its own install or WhatsApp card — Confirm only ever comes
       from the UI
-- [ ] Accent picker in Settings > Appearance that changes `--accent`
+- [x] Accent picker in Settings > Appearance that changes `--accent`
 - Done when: the first model in the list is forced to fail, the next one answers, and the
   failed one stays skipped for its cooldown.
+  **Verified live through the Desktop shortcut** (temp data dir, mock provider): `fail-429`
+  returned 429 → `cooldown fail-429 for 300s (rate_limit)` → notice
+  "fail-429 hit its limit, switched to ok-model" → `ok-model` answered; the next request logged
+  `model fail-429 is resting -> skipped this request` and `route chose ok-model after 0 failed
+  attempt(s)`; the model picker showed `resting 0:35` counting down.
 
 ## Phase 7 — Memory
 - [ ] `facts(key, value, category, updated_at)` plus FTS5 over past messages

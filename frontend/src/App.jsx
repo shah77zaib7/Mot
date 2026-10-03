@@ -6,7 +6,7 @@ import InputBar from './components/InputBar.jsx';
 import SettingsModal from './components/SettingsModal.jsx';
 import { Gear, Moon, Sun } from './components/icons.jsx';
 import { api, streamChat, watchActions } from './api.js';
-import { applyTheme, watchSystemTheme } from './theme.js';
+import { applyAccent, applyTheme, watchSystemTheme } from './theme.js';
 import TagChip from './components/TagChip.jsx';
 
 const TAG_RANK = { free: 0, local: 1, paid: 2, unknown: 3 };
@@ -33,6 +33,9 @@ export default function App() {
     providers: [],
     active: null,
     theme: 'system',
+    accent: null,
+    fallback: [],
+    resting: [],
     presets: [],
   });
   const [chats, setChats] = useState([]);
@@ -40,6 +43,7 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [streamText, setStreamText] = useState('');
   const [streamActions, setStreamActions] = useState([]); // live action cards
+  const [notices, setNotices] = useState([]); // "X hit its limit, switched to Y"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null); // {message, fix}
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -84,6 +88,10 @@ export default function App() {
     setIsDark(document.documentElement.classList.contains('dark'));
     return watchSystemTheme(settings.theme);
   }, [settings.theme]);
+
+  useEffect(() => {
+    applyAccent(settings.accent); // Settings > Appearance (Phase 6)
+  }, [settings.accent]);
 
   useEffect(() => {
     const observer = new MutationObserver(() =>
@@ -146,6 +154,7 @@ export default function App() {
       setMessages(data.messages);
       setStreamText('');
       setError(null);
+      setNotices([]);
     },
     [updateChatId]
   );
@@ -166,6 +175,7 @@ export default function App() {
     setMessages([]);
     setStreamText('');
     setStreamActions([]);
+    setNotices([]);
     setError(null);
     setInput('');
   }, [stop, updateChatId]);
@@ -265,6 +275,11 @@ export default function App() {
             setStreamText('');
             setStreamActions([]);
             await refreshChats();
+          } else if (event.type === 'switch') {
+            // The router moved to another model: say so, and refresh the
+            // "resting" markers now that a cooldown has started.
+            setNotices((prev) => [...prev, event.text]);
+            api('/api/providers').then(setSettings).catch(() => {});
           } else if (event.type === 'error') {
             setStreamText('');
             setError({
@@ -272,6 +287,7 @@ export default function App() {
               fix: event.fix,
               code: event.code,
               model: event.model,
+              models: event.models,
             });
             if (!acc && !regenerate) setInput(text); // nothing replied — easy retry
           }
@@ -326,8 +342,10 @@ export default function App() {
   }, [input, regenerate, send]);
 
   const changeModel = useCallback((selection) => {
-    // Switch instantly, then persist in the background.
+    // Switch instantly, then persist in the background. Picking a resting
+    // model by hand wakes it up: the cooldown only filters automatic moves.
     setSettings((prev) => ({ ...prev, active: selection }));
+    api('/api/providers/wake', { method: 'POST', body: selection }).catch(() => {});
     api('/api/providers/active', { method: 'PUT', body: selection }).catch((err) =>
       setError({ message: err.message })
     );
@@ -422,20 +440,44 @@ export default function App() {
                   onSummarize={summarize}
                 />
               ))}
+              {notices.map((text, index) => (
+                <p
+                  key={`switch-${index}`}
+                  className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+                >
+                  {text}
+                </p>
+              ))}
             </div>
           )}
         </div>
 
         {error && (
           <div className="mx-auto w-full max-w-[760px] px-4 pb-1">
-            {error.code === 'rate_limit' ? (
+            {error.code === 'rate_limit' || error.code === 'fallback_exhausted' ? (
               <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-sm">
                 <div className="flex items-start gap-3">
                   <div className="min-w-0 flex-1 leading-relaxed">
                     <p className="font-semibold text-amber-600 dark:text-amber-400">
-                      {error.model || 'This model'} hit its limit
+                      {error.code === 'fallback_exhausted'
+                        ? 'No model answered'
+                        : `${error.model || 'This model'} hit its limit`}
                     </p>
                     <p className="mt-0.5 text-inksoft">{error.message}</p>
+                    {error.models?.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {error.models.map((item) => (
+                          <li
+                            key={item.label}
+                            className="flex items-baseline gap-1.5 text-[12px] text-inksoft"
+                          >
+                            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500/70" />
+                            <span className="text-ink">{item.label}</span>
+                            <span>— {item.why}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                   <button
                     onClick={retry}
@@ -499,6 +541,7 @@ export default function App() {
           busy={busy}
           providers={settings.providers}
           active={settings.active}
+          resting={settings.resting}
           onModelChange={changeModel}
           onOpenSettings={() => setSettingsOpen(true)}
         />

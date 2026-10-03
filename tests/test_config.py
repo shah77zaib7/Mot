@@ -91,7 +91,10 @@ def test_api_key_never_leaves_keyring(cfg):
         api_key="gsk_super_secret",
     )
 
-    assert cfg == {f"mot-{provider['id']}": "gsk_super_secret"}
+    # unique account name: `mot-<provider>-<random>`, never one in reuse
+    (stored_ref,) = cfg
+    assert stored_ref.startswith(f"mot-{provider['id']}-")
+    assert len(stored_ref) > len(f"mot-{provider['id']}-")
     dumped = json.dumps(provider)
     assert "gsk_super_secret" not in dumped
     assert "key_ref" not in provider
@@ -99,6 +102,18 @@ def test_api_key_never_leaves_keyring(cfg):
     assert provider["key_masked"] == config.KEY_MASK
     # and the config file itself never sees it
     assert "gsk_super_secret" not in config.CONFIG_PATH.read_text(encoding="utf-8")
+
+
+def test_two_providers_never_share_a_keyring_name(cfg):
+    first = config.save_provider({"name": "Alpha", "base_url": "https://a/v1",
+                                  "models": []}, api_key="sk-a")
+    second = config.save_provider({"name": "Beta", "base_url": "https://b/v1",
+                                   "models": []}, api_key="sk-b")
+
+    stored = config.load()
+    refs = [p["key_ref"] for p in stored["providers"]]
+    assert len(set(refs)) == 2
+    assert set(cfg) == set(refs)  # exactly the two keys this test created
 
 
 def test_saving_without_a_key_keeps_the_stored_one(cfg):
@@ -158,7 +173,7 @@ def test_chat_target_uses_the_right_litellm_prefix(cfg):
     assert remote["model"] == "openai/llama-3.1-8b-instant"
     assert remote["api_base"] == "https://api.groq.com/openai/v1"
     assert remote["label"] == "llama-3.1-8b-instant"
-    assert remote["key_ref"] == f"mot-{cloud['id']}"
+    assert remote["key_ref"].startswith(f"mot-{cloud['id']}-")
 
 
 def test_chat_target_without_a_selection_falls_back_to_active(cfg):

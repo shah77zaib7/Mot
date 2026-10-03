@@ -31,6 +31,11 @@ Read these before coding:
 - Windows first: use pathlib, no Linux-only commands.
 - Log to logs/mot.log. Never log secrets.
 
+## Testing rules
+- Tests and verification must never use, modify, or delete the user's real keyring entries,
+  config, contacts, or chats. Use temporary names and temp data dirs, and clean up only what
+  you created.
+
 ## Speed and cost rules
 - Prefer plain code over LLM calls. Anything deterministic (open URL, open app, routines) must work with no model.
 - Keep prompts and tool descriptions short. Keep the tool list small.

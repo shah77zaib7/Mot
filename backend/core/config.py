@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import threading
 from typing import Any
 
@@ -211,6 +212,16 @@ def get_provider(provider_id: str) -> dict[str, Any] | None:
     return _find(load().get("providers", []), provider_id)
 
 
+def _new_key_ref(provider_id: str) -> str:
+    """A Credential Manager account name no other provider can ever own.
+
+    The old `mot-<provider id>` scheme reused whatever entry happened to sit
+    under that name — including orphans left by an earlier install. A random
+    suffix makes a collision effectively impossible (Phase 6).
+    """
+    return f"mot-{provider_id}-{secrets.token_hex(4)}"
+
+
 def save_provider(data: dict[str, Any], api_key: str | None = None) -> dict[str, Any]:
     """Add or update a provider and its model list. Stores the key if given."""
     name = (data.get("name") or "").strip()
@@ -227,7 +238,8 @@ def save_provider(data: dict[str, Any], api_key: str | None = None) -> dict[str,
     provider["base_url"] = (data.get("base_url") or "").strip().rstrip("/") or None
     provider["models"] = _clean_models(data.get("models"))
     if api_key:
-        ref = provider.get("key_ref") or f"mot-{provider['id']}"
+        # A provider keeps its own ref forever; only a first key mints a new one.
+        ref = provider.get("key_ref") or _new_key_ref(provider["id"])
         set_secret(ref, api_key)
         provider["key_ref"] = ref
 
@@ -246,8 +258,13 @@ def delete_provider(provider_id: str) -> bool:
     victim = _find(providers, provider_id)
     if victim is None:
         return False
-    if victim.get("key_ref"):
-        delete_secret(victim["key_ref"])
+    ref = victim.get("key_ref")
+    # Delete only *this* provider's key: never an entry another provider
+    # (or something outside Mot) happens to share the name of.
+    if ref and not any(
+        p.get("key_ref") == ref for p in providers if p.get("id") != provider_id
+    ):
+        delete_secret(ref)
     config["providers"] = [p for p in providers if p.get("id") != provider_id]
     active = config.get("active")
     if isinstance(active, dict) and active.get("provider_id") == provider_id:
@@ -317,6 +334,10 @@ def chat_target(provider_id: str | None, model_id: str | None) -> dict[str, Any]
         "api_base": base_url,
         "key_ref": provider.get("key_ref"),
         "label": model["id"],
+        # fallback (Phase 6) needs to know exactly which saved model this is
+        "provider_id": provider["id"],
+        "model_id": model["id"],
+        "tag": model.get("tag", "unknown"),
     }
 
 
@@ -329,6 +350,99 @@ def set_theme(theme: str) -> None:
     config = load()
     config["theme"] = theme if theme in ("light", "dark", "system") else "system"
     save(config)
+
+
+# --- accent colour (Settings > Appearance, Phase 6) --------------------------
+
+ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+DEFAULT_ACCENT = "#14b8a6"  # matches --accent in frontend/src/index.css
+
+
+def accent() -> str:
+    saved = str(load().get("accent") or "").strip()
+    return saved if ACCENT_RE.match(saved) else DEFAULT_ACCENT
+
+
+def set_accent(value: str) -> str:
+    saved = str(value or "").strip()
+    config = load()
+    config["accent"] = saved if ACCENT_RE.match(saved) else DEFAULT_ACCENT
+    save(config)
+    return config["accent"]
+
+
+# --- auto-switch order (Settings > Models, Phase 6) --------------------------
+
+def _model_index(config: dict[str, Any]) -> dict[str, tuple[dict, dict]]:
+    """`"provider_id|model_id"` -> (provider, model) for every saved model."""
+    out: dict[str, tuple[dict, dict]] = {}
+    for provider in config.get("providers", []):
+        for model in provider.get("models", []):
+            out[f"{provider['id']}|{model['id']}"] = (provider, model)
+    return out
+
+
+def _fallback_entry(
+    provider: dict[str, Any], model: dict[str, Any], raw: Any
+) -> dict[str, Any]:
+    """One row: order comes from the file, `auto` defaults off for paid models."""
+    auto = raw.get("auto") if isinstance(raw, dict) and isinstance(
+        raw.get("auto"), bool
+    ) else model.get("tag") != "paid"
+    return {
+        "provider_id": provider["id"],
+        "model_id": model["id"],
+        "auto": bool(auto),
+        "tag": model.get("tag", "unknown"),
+        "name": provider.get("name") or "Provider",
+    }
+
+
+def fallback_list() -> list[dict[str, Any]]:
+    """Every saved model in the order the router should try them.
+
+    `auto` is the "allow auto-switch" checkbox. A model tagged `paid` is
+    never switched into until the user ticks it (cost safety).
+    """
+    config = load()
+    index = _model_index(config)
+    stored = config.get("fallback")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if isinstance(stored, list):
+        for raw in stored:
+            if not isinstance(raw, dict):
+                continue
+            key = f"{raw.get('provider_id')}|{raw.get('model_id')}"
+            if key in index and key not in seen:
+                out.append(_fallback_entry(*index[key], raw))
+                seen.add(key)
+    for key, (provider, model) in index.items():  # models added since last save
+        if key not in seen:
+            out.append(_fallback_entry(provider, model, {}))
+    return out
+
+
+def set_fallback(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Save the order and the ticks; unknown or duplicate rows are dropped."""
+    config = load()
+    index = _model_index(config)
+    clean: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in entries or []:
+        if not isinstance(raw, dict):
+            continue
+        provider_id = str(raw.get("provider_id") or "")
+        model_id = str(raw.get("model_id") or "")
+        key = f"{provider_id}|{model_id}"
+        if key not in index or key in seen:
+            continue
+        seen.add(key)
+        clean.append({"provider_id": provider_id, "model_id": model_id,
+                      "auto": bool(raw.get("auto"))})
+    config["fallback"] = clean
+    save(config)
+    return fallback_list()
 
 
 # --- Settings > General (Phase 5A) ------------------------------------------

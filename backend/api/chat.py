@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ..core import config, db, llm, llm_router, router as fast, runner
+from ..core import config, db, fallback, llm, llm_router, router as fast, runner
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -192,6 +192,7 @@ async def chat(body: ChatIn) -> StreamingResponse:
     route_text = " and ".join(rest) if plan else text  # only what the rules couldn't take
 
     async def stream() -> AsyncIterator[str]:
+        nonlocal label, target  # a fallback switch renames the model mid-reply
         yield _event({"type": "start", "chat_id": chat_id, "profile": label})
         collected: list[dict[str, Any]] = []  # action cards: fast steps + model steps
         parts: list[str] = []
@@ -209,17 +210,26 @@ async def chat(body: ChatIn) -> StreamingResponse:
                 return f"{summary} {reply}"
             return reply
 
+        async def speak(profiles: list[dict[str, Any]],
+                        messages: list[dict[str, Any]]) -> AsyncIterator[str]:
+            """Deltas, plus a short notice each time the router changes model."""
+            async for kind, text in fallback.stream(profiles, messages):
+                if kind == "notice":
+                    yield _event({"type": "switch", "text": text})
+                    continue
+                if stop_event.is_set():
+                    break
+                parts.append(text)
+                yield _event({"type": "delta", "text": text})
+
         async def research(items: list[dict[str, Any]]) -> AsyncIterator[str]:
             """Second completion: findings in, 4-6 sourced bullets out."""
             nonlocal researched
             researched = True
             log.info("path=research items=%d", len(items))
             messages = llm_router.research_messages(route_text, history, items)
-            async for chunk in llm.stream_chat(target, messages):
-                if stop_event.is_set():
-                    break
-                parts.append(chunk)
-                yield _event({"type": "delta", "text": chunk})
+            async for event in speak(fallback.candidates(target), messages):
+                yield event
             if parts and not stop_event.is_set():
                 footer = llm_router.research_footer()
                 parts.append(footer)
@@ -239,12 +249,19 @@ async def chat(body: ChatIn) -> StreamingResponse:
                         yield event
 
                 if rest:
-                    decision = await llm_router.route(
-                        target,
+                    # One pass over the ordered list: the first model that
+                    # answers wins, the others are cooled down (Phase 6).
+                    out = await fallback.route(
+                        fallback.candidates(target),
                         route_text,
                         history,
                         done=runner.summary(collected) if collected else None,
                     )
+                    for text in out["notices"]:
+                        yield _event({"type": "switch", "text": text})
+                    decision = out["decision"]
+                    target = out["profile"]
+                    label = target["label"]
                     if decision["kind"] == "chat":
                         log.info("path=llm->chat (%s)", decision.get("reason"))
 
@@ -264,11 +281,8 @@ async def chat(body: ChatIn) -> StreamingResponse:
                         parts.append(chunk)
                         yield _event({"type": "delta", "text": chunk})
                 elif decision["kind"] == "chat" and not researched:
-                    async for chunk in llm.stream_chat(target, history):
-                        if stop_event.is_set():
-                            break
-                        parts.append(chunk)
-                        yield _event({"type": "delta", "text": chunk})
+                    async for event in speak(fallback.candidates(target), history):
+                        yield event
         except llm.LLMError as exc:
             content = compose()
             if content:
@@ -277,7 +291,8 @@ async def chat(body: ChatIn) -> StreamingResponse:
                 saved = True
             yield _event(
                 {"type": "error", "message": exc.message, "fix": exc.fix,
-                 "code": exc.code, "model": label, "chat_id": chat_id}
+                 "code": exc.code, "model": label, "chat_id": chat_id,
+                 "models": exc.models}
             )
         except Exception:  # noqa: BLE001 - never crash the stream
             content = compose()

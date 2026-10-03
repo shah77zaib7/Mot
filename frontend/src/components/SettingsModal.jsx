@@ -31,6 +31,18 @@ function Field({ label, hint, children }) {
 const inputClass =
   'w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-ink outline-none placeholder:text-inksoft focus:border-accent';
 
+// Swatches offered in Settings > Appearance; the last control picks any colour.
+const ACCENTS = [
+  '#14b8a6',
+  '#0ea5e9',
+  '#6366f1',
+  '#8b5cf6',
+  '#ec4899',
+  '#ef4444',
+  '#f59e0b',
+  '#22c55e',
+];
+
 function hostnameOf(url) {
   try {
     return new URL(url).hostname.replace(/^www\./, '');
@@ -263,10 +275,39 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
       await refresh();
     });
 
+  const setAccent = (accent) =>
+    run(async () => {
+      await api('/api/settings', { method: 'PUT', body: { accent } });
+      await refresh();
+    });
+
+  // --- auto-switch order (Settings > Models, Phase 6) -----------------------
+  const saveFallback = (list) =>
+    run(async () => {
+      await api('/api/fallback', { method: 'PUT', body: { models: list } });
+      await refresh();
+    });
+
+  const moveFallback = (index, delta) => {
+    const list = [...(settings.fallback || [])];
+    const at = index + delta;
+    if (at < 0 || at >= list.length) return;
+    [list[index], list[at]] = [list[at], list[index]];
+    saveFallback(list);
+  };
+
+  const toggleFallback = (index) => {
+    const list = (settings.fallback || []).map((entry, i) =>
+      i === index ? { ...entry, auto: !entry.auto } : entry
+    );
+    saveFallback(list);
+  };
+
   const visibleRows = search.trim()
     ? rows.filter((row) => row.id.toLowerCase().includes(search.trim().toLowerCase()))
     : rows;
   const selectedCount = rows.filter((row) => row.on).length;
+  const fallbackRows = settings.fallback || [];
 
   return (
     <div
@@ -608,6 +649,73 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
                   <Plus size={16} />
                   Add provider
                 </button>
+
+                {fallbackRows.length > 0 && (
+                  <div className="rounded-xl border border-line">
+                    <div className="border-b border-line px-3 py-2.5">
+                      <p className="text-xs font-semibold text-ink">Auto-switch order</p>
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-inksoft">
+                        When a model hits its limit, times out or goes missing, Mot tries the
+                        next ticked one down this list — once, then it stops. Tick a model to
+                        allow auto-switch into it; paid models stay off until you tick them.
+                      </p>
+                    </div>
+
+                    {fallbackRows.map((entry, index) => (
+                      <div
+                        key={`${entry.provider_id}:${entry.model_id}`}
+                        className="flex items-center gap-2 border-b border-line/60 px-3 py-2 last:border-b-0"
+                      >
+                        <span className="w-4 shrink-0 text-[11px] text-inksoft">
+                          {index + 1}
+                        </span>
+                        <label
+                          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-[13px] text-ink"
+                          title="Allow auto-switch into this model"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(entry.auto)}
+                            onChange={() => toggleFallback(index)}
+                            disabled={busy}
+                            aria-label={`Allow auto-switch into ${entry.model_id}`}
+                            className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
+                          />
+                          <span className="min-w-0 truncate">{entry.model_id}</span>
+                          <span className="shrink-0 truncate text-[11px] text-inksoft">
+                            {entry.name}
+                          </span>
+                          <TagChip tag={entry.tag} />
+                        </label>
+                        <button
+                          onClick={() => moveFallback(index, -1)}
+                          disabled={busy || index === 0}
+                          aria-label={`Move ${entry.model_id} up`}
+                          className="rounded px-1.5 py-1 text-xs text-inksoft hover:bg-surface2 hover:text-ink disabled:opacity-30"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          onClick={() => moveFallback(index, 1)}
+                          disabled={busy || index === fallbackRows.length - 1}
+                          aria-label={`Move ${entry.model_id} down`}
+                          className="rounded px-1.5 py-1 text-xs text-inksoft hover:bg-surface2 hover:text-ink disabled:opacity-30"
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    ))}
+
+                    <p className="px-3 py-2 text-[11px] leading-relaxed text-inksoft">
+                      A model that failed rests for a few minutes (rate limit), half an hour
+                      (timeout or server error) or 6 hours (missing). It shows as
+                      <span className="mx-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                        resting
+                      </span>
+                      in the model picker.
+                    </p>
+                  </div>
+                )}
               </div>
             ))}
 
@@ -648,6 +756,37 @@ export default function SettingsModal({ open, onClose, settings, onChanged }) {
                   )}
                 </button>
               ))}
+              <div className="pt-3">
+                <span className="mb-1.5 block text-xs font-medium text-inksoft">
+                  Accent colour
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {ACCENTS.map((hex) => (
+                    <button
+                      key={hex}
+                      onClick={() => setAccent(hex)}
+                      aria-label={`Use ${hex} as the accent colour`}
+                      aria-pressed={settings.accent === hex}
+                      className={`h-7 w-7 rounded-full border-2 transition-transform hover:scale-110 ${
+                        settings.accent === hex ? 'border-ink' : 'border-line'
+                      }`}
+                      style={{ backgroundColor: hex }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={settings.accent || ACCENTS[0]}
+                    onChange={(event) => setAccent(event.target.value)}
+                    aria-label="Pick a custom accent colour"
+                    className="h-7 w-9 cursor-pointer rounded-lg border border-line bg-transparent p-0.5"
+                  />
+                </div>
+                <p className="mt-1.5 text-[11px] text-inksoft">
+                  Changes <code className="text-inksoft">--accent</code>: buttons, highlights
+                  and the model picker.
+                </p>
+              </div>
+
               <p className="pt-2 text-[11px] text-inksoft">
                 Keys are stored in Windows Credential Manager, not in this app's files.
               </p>
